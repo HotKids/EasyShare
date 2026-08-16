@@ -36,7 +36,7 @@ Easy Share 是一款兼容互传联盟协议的 Android 本地文件互传应用
 ./gradlew testDebugUnitTest lintDebug assembleDebug
 ```
 
-Release 构建默认生成未签名 APK。正式包由 GitHub Actions 从仓库 Secrets 临时恢复 release keystore 后完成签名，私钥不会进入仓库或构建产物。
+Release 构建会优先使用环境变量或用户级 Gradle 属性提供的正式签名；凭据缺失时自动回退到 debug 签名，确保新 clone 的项目仍可直接编译。GitHub Actions 只在临时目录恢复 release keystore，并在签名后立即删除，私钥不会进入仓库或构建产物。
 
 ## 自动发布
 

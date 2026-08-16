@@ -12,6 +12,7 @@
 *.jks
 *.keystore
 *.p12
+keystore.properties
 signing.properties
 
 # Generated Android packages and local verification artifacts.

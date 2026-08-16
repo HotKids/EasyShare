@@ -2,14 +2,23 @@
 
 Easy Share 使用 GitHub Actions 构建并签名正式 APK。release keystore 不存放在仓库中，Workflow 只通过 GitHub Actions Secrets 在临时目录中恢复密钥，并在任务结束后删除。
 
-## 签名 Secrets
+## 签名配置
 
-仓库需要配置以下 Secrets：
+Gradle 的 Release 签名优先读取环境变量，其次读取用户目录下的 `~/.gradle/gradle.properties`。支持以下键：
 
-- `EASY_SHARE_KEYSTORE_BASE64`
-- `EASY_SHARE_KEYSTORE_PASSWORD`
-- `EASY_SHARE_KEY_ALIAS`
-- `EASY_SHARE_KEY_PASSWORD`
+- `SIGNING_KEYSTORE_PATH`
+- `SIGNING_STORE_PASSWORD`
+- `SIGNING_KEY_PASSWORD`
+- `SIGNING_KEY_ALIAS`
+
+四项均有效时使用正式 Release 签名；任意一项缺失或 keystore 不存在时自动回退到 debug 签名，因此新 clone 的项目无需私钥也能直接构建。正式构建不要使用 Gradle 的 `--info` 或 `--debug` 日志级别。
+
+本机构建应从系统钥匙串读取密码并通过环境变量注入，不在项目或用户属性文件中落盘。CI 使用以下 Repository Secrets：
+
+- `SIGNING_KEYSTORE_BASE64`
+- `SIGNING_STORE_PASSWORD`
+- `SIGNING_KEY_PASSWORD`
+- `SIGNING_KEY_ALIAS`
 
 本机 keystore 应离线备份。GitHub Secrets 无法作为可靠的密钥备份，也无法在保存后读取明文。丢失用于直接分发 APK 的签名私钥，将无法继续为现有安装提供无缝更新。
 
@@ -21,7 +30,7 @@ Easy Share 使用 GitHub Actions 构建并签名正式 APK。release keystore �
 - `easy-share-arm64.apk`
 - `SHA256SUMS`
 
-Pull Request 只执行验证，不读取签名 Secrets，也不生成正式签名包。
+Pull Request 使用 debug 回退签名执行完整 Release 构建，不读取签名 Secrets，也不生成正式签名 artifact。
 
 ## 创建 Release
 

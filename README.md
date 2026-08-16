@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Android 12+](https://img.shields.io/badge/Android-12%2B-3DDC84.svg)](https://developer.android.com/about/versions/12)
 
-Easy Share 是一款面向 Android 设备的本地文件互传应用，通过蓝牙发现设备，并使用 Wi‑Fi Direct 建立高速点对点连接。传输在设备之间直接完成，不依赖云端中转。
+Easy Share 是一款兼容互传联盟协议的 Android 本地文件互传应用，可通过蓝牙发现附近的互传联盟设备，并使用 Wi‑Fi Direct 建立高速点对点连接。文件仅在设备之间直接传输，不依赖云端中转。
 
 > Easy Share 基于 [kmod-midori/CatShare](https://github.com/kmod-midori/CatShare) 开发，并在 Codex 协助下完成全面重构。项目在保留互传联盟兼容能力的基础上，重新设计了界面、交互与传输流程，并增强了设备识别、传输稳定性与安全性。感谢 CatShare 原作者及所有贡献者。
 

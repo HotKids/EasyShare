@@ -24,6 +24,12 @@ object SessionSecurity {
         )
     }
 
+    fun isAuthorized(
+        secureSessionRequired: Boolean,
+        expectedToken: String,
+        candidateToken: String?,
+    ): Boolean = !secureSessionRequired || constantTimeEquals(expectedToken, candidateToken)
+
     private fun ByteArray.toHex(): String = joinToString("") {
         "%02x".format(it.toInt() and 0xff)
     }

@@ -51,7 +51,7 @@ object IncomingTransferUiCoordinator {
     @Synchronized
     fun fail(taskId: Int, message: String, canceled: Boolean = false) {
         val current = _states.value[taskId] ?: return
-        if (current.status == IncomingTransferUiStatus.REQUESTED || current.status.isTerminal()) return
+        if (current.status.isTerminal()) return
         publish(
             current.copy(
                 status = if (canceled) {

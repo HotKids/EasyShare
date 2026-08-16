@@ -7,6 +7,6 @@ import dalvik.system.ZipPathValidator.Callback
 @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
 object ZipPathValidatorCallback : Callback {
     override fun onZipEntryAccess(path: String) {
-        super.onZipEntryAccess(path)
+        ArchiveEntryNames.validate(path)
     }
 }

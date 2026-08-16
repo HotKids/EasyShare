@@ -65,6 +65,8 @@ class GattServerService : Service() {
     private var btAdvertiser: BluetoothLeAdvertiser? = null
 
     private var advertisingSet: AdvertisingSet? = null
+    @Volatile
+    private var destroyed = false
 
     private val localDeviceInfoLock = Object()
     private var localDeviceInfo = DeviceInfo(
@@ -93,11 +95,17 @@ class GattServerService : Service() {
     private var internalReceiverRegistered = false
 
     private val advSetCallback = object : AdvertisingSetCallback() {
+        @SuppressLint("MissingPermission")
         override fun onAdvertisingSetStarted(
             advertisingSet: AdvertisingSet?, txPower: Int, status: Int
         ) {
             if (status == ADVERTISE_SUCCESS) {
-                this@GattServerService.advertisingSet = advertisingSet
+                if (destroyed) {
+                    runCatching { btAdvertiser?.stopAdvertisingSet(this) }
+                        .onFailure { Log.w(TAG, "Failed to stop late BLE advertiser", it) }
+                } else {
+                    this@GattServerService.advertisingSet = advertisingSet
+                }
             } else {
                 Log.e(TAG, "Advertising failed: $status")
             }
@@ -338,6 +346,7 @@ class GattServerService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        destroyed = false
 
         if (!checkBluetoothPermissions() || !checkNotificationPermission()) {
             Toast.makeText(this, R.string.permission_not_granted, Toast.LENGTH_LONG).show()
@@ -484,17 +493,15 @@ class GattServerService : Service() {
 
     @SuppressLint("MissingPermission")
     override fun onDestroy() {
-        super.onDestroy()
+        destroyed = true
         if (internalReceiverRegistered) {
             unregisterReceiver(internalReceiver)
+            internalReceiverRegistered = false
         }
         sendBroadcast(ServiceState.getUpdateIntent(false))
 
         try {
-            advertisingSet?.run {
-                btAdvertiser?.stopAdvertisingSet(advSetCallback)
-            }
-
+            btAdvertiser?.stopAdvertisingSet(advSetCallback)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to stop advertising", e)
         }
@@ -508,6 +515,7 @@ class GattServerService : Service() {
         }
         gattServer = null
         pendingGattWrites.clear()
+        super.onDestroy()
     }
 
     private fun updateMacAddress(mac: String) {

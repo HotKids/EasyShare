@@ -86,7 +86,7 @@
         <item quantity="other">%1$d files</item>
     </plurals>
     <string name="incoming_transfer_timeout">Receive request timed out</string>
-    <string name="incoming_receive_timeout_hint">Declines in %1$d seconds</string>
+    <string name="incoming_receive_timeout_hint">Times out in %1$d seconds</string>
     <string name="cancel_transfer">Cancel transfer</string>
     <string name="close">Close</string>
     <string name="open">Open</string>

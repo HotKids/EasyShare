@@ -52,7 +52,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -234,11 +233,12 @@ fun ShareActivityContent(
     onDone: () -> Unit,
 ) {
     val context = LocalContext.current
-    val refreshToken by remember { mutableIntStateOf(0) }
-    val discoveredDevices = deviceScanner(refreshToken)
+    val discoveredDevices = deviceScanner()
     val transferStates by TransferUiCoordinator.states.collectAsState()
     var selectedTransfer by remember { mutableStateOf<SelectedTransfer?>(null) }
-    val selectedState = selectedTransfer?.let { transferStates[it.device.id] }
+    val selectedState = selectedTransfer?.let { transfer ->
+        transferStates[transfer.device.id]?.takeIf { it.taskId == transfer.taskId }
+    }
     val outsideInteraction = remember { MutableInteractionSource() }
 
     BackHandler {
@@ -294,7 +294,7 @@ fun ShareActivityContent(
                                 items(discoveredDevices, key = { it.id }) { device ->
                                     DeviceGridItem(
                                         device = device,
-                                        state = transferStates[device.id],
+                                        state = null,
                                         enabled = true,
                                         onClick = {
                                             val taskId = Random.nextInt()
@@ -383,13 +383,13 @@ private fun OutgoingTransferSheet(
         )
     }
     val supporting = when (status) {
-        TransferUiStatus.WAITING,
+        TransferUiStatus.WAITING -> statusText
         TransferUiStatus.SENDING -> null
 
         else -> listOfNotNull(sizeLabel, statusText).joinToString(" · ")
     }
     val visualState = when (status) {
-        TransferUiStatus.WAITING,
+        TransferUiStatus.WAITING -> TransferVisualState.FILE
         TransferUiStatus.SENDING -> TransferVisualState.PROGRESS
 
         TransferUiStatus.SUCCESS,
@@ -415,7 +415,6 @@ private fun OutgoingTransferSheet(
         ),
         visualState = visualState,
         progress = when (status) {
-            TransferUiStatus.WAITING -> 0
             TransferUiStatus.SENDING -> state?.progress ?: 0
             else -> null
         },
@@ -577,11 +576,11 @@ private fun deviceItemHeight(state: TransferUiState?): Dp = if (state == null) 9
 
 @SuppressLint("MissingPermission")
 @Composable
-fun deviceScanner(refreshToken: Int): List<DiscoveredDevice> {
+fun deviceScanner(): List<DiscoveredDevice> {
     val context = LocalContext.current
-    var discoveredDevices by remember(refreshToken) { mutableStateOf(emptyList<DiscoveredDevice>()) }
+    var discoveredDevices by remember { mutableStateOf(emptyList<DiscoveredDevice>()) }
 
-    LifecycleResumeEffect(context to refreshToken) {
+    LifecycleResumeEffect(context) {
         val manager = context.getSystemService(BluetoothManager::class.java)
         val adapter = manager.adapter
         val devicesLock = Object()

@@ -49,12 +49,13 @@ class IncomingTransferUiCoordinatorTest {
     }
 
     @Test
-    fun rejectedRequestIsNotChangedIntoFailurePage() {
-        IncomingTransferUiCoordinator.fail(taskId, message = "rejected", canceled = true)
+    fun disconnectedRequestMovesToFailurePage() {
+        IncomingTransferUiCoordinator.fail(taskId, message = "connection lost")
         assertEquals(
-            IncomingTransferUiStatus.REQUESTED,
+            IncomingTransferUiStatus.FAILED,
             IncomingTransferUiCoordinator.get(taskId)?.status,
         )
+        assertEquals("connection lost", IncomingTransferUiCoordinator.get(taskId)?.errorMessage)
     }
 
     @Test

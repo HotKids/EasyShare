@@ -5,7 +5,7 @@ import androidx.annotation.DrawableRes
 import me.pipi.easyshare.AppSettings
 import me.pipi.easyshare.MyApplication
 import me.pipi.easyshare.R
-import java.util.Random
+import java.security.SecureRandom
 
 data class BrandConfig(
     val idRange: IntRange,
@@ -17,6 +17,8 @@ data class BrandConfig(
 )
 
 object DeviceUtils {
+    private val secureRandom = SecureRandom()
+
     // Single Source of Truth for Brand Mappings
     private val BRAND_REGISTRY = listOf(
         BrandConfig(114514..114514, "Easy Share"),
@@ -82,6 +84,9 @@ object DeviceUtils {
     fun knownDeviceNameById(id: Int): String? =
         BRAND_REGISTRY.firstOrNull { id in it.idRange }?.name
 
+    fun requiresTwoGhzP2pCompatibility(id: Int?): Boolean =
+        id != null && knownDeviceNameById(id) == "Samsung"
+
     fun deviceNameById(id: Int): String = knownDeviceNameById(id) ?: "Unknown"
 
     @DrawableRes
@@ -124,9 +129,8 @@ object DeviceUtils {
     fun getRandomChars(len: Int): String {
         val alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".toCharArray()
         val sb = StringBuilder()
-        val rand = Random()
         repeat(len) {
-            sb.append(alphabet[rand.nextInt(alphabet.size)])
+            sb.append(alphabet[secureRandom.nextInt(alphabet.size)])
         }
         return sb.toString()
     }

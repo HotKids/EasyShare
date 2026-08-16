@@ -13,7 +13,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: android-${{ github.workflow }}-${{ github.ref }}
+  group: android-${{ github.workflow }}-${{ startsWith(github.ref, 'refs/tags/v') && 'release' || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -153,3 +153,43 @@ jobs:
             --verify-tag \
             --generate-notes \
             --title "Easy Share $GITHUB_REF_NAME"
+
+      - name: Remove previous releases and release tags
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          current_tag="$GITHUB_REF_NAME"
+          releases="$(
+            gh api \
+              --paginate \
+              "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+              --jq '.[] | [.id, .tag_name] | @tsv'
+          )"
+
+          while IFS=$'\t' read -r release_id release_tag; do
+            if [[ -n "$release_id" && "$release_tag" != "$current_tag" ]]; then
+              echo "Removing previous release: $release_tag"
+              gh api \
+                --method DELETE \
+                "repos/$GITHUB_REPOSITORY/releases/$release_id"
+            fi
+          done <<< "$releases"
+
+          release_tags="$(
+            gh api \
+              --paginate \
+              "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v?per_page=100" \
+              --jq '.[].ref'
+          )"
+
+          while IFS= read -r tag_ref; do
+            tag_name="${tag_ref#refs/tags/}"
+            if [[ -n "$tag_name" && "$tag_name" != "$current_tag" ]]; then
+              echo "Removing previous release tag: $tag_name"
+              gh api \
+                --method DELETE \
+                "repos/$GITHUB_REPOSITORY/git/refs/${tag_ref#refs/}"
+            fi
+          done <<< "$release_tags"

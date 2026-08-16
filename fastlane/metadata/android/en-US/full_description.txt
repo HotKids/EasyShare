@@ -1,5 +1,0 @@
-Features:
-
-- Bluetooth discovery
-- Receive file
-- Send file (Shizuku required)

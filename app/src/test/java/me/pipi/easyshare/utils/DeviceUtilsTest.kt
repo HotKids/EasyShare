@@ -1,10 +1,30 @@
 package me.pipi.easyshare.utils
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DeviceUtilsTest {
+    @Test
+    fun randomNetworkCredentialsUseExpectedAlphabetAndVary() {
+        val first = DeviceUtils.getRandomChars(32)
+        val second = DeviceUtils.getRandomChars(32)
+
+        assertEquals(32, first.length)
+        assertTrue(first.all { it.isLetterOrDigit() })
+        assertNotEquals(first, second)
+    }
+
+    @Test
+    fun samsungPeersUseTheCompatibilityP2pBand() {
+        assertTrue(DeviceUtils.requiresTwoGhzP2pCompatibility(70))
+        assertTrue(DeviceUtils.requiresTwoGhzP2pCompatibility(75))
+        assertFalse(DeviceUtils.requiresTwoGhzP2pCompatibility(76))
+        assertFalse(DeviceUtils.requiresTwoGhzP2pCompatibility(null))
+    }
+
     @Test
     fun selectableBrandsStayInRequiredOrder() {
         assertEquals(

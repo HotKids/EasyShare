@@ -39,11 +39,13 @@ Pull Request 使用 debug 回退签名执行完整 Release 构建，不读取签
 3. 创建并推送与版本一致的标签，例如：
 
 ```bash
-git tag v0.1
-git push origin v0.1
+git tag v0.2
+git push origin v0.2
 ```
 
 标签 Workflow 会验证、签名并创建对应的 GitHub Release。
+
+新 Release 创建成功后，Workflow 会自动删除此前的 GitHub Releases 及其 `v*` 发布标签，仓库只保留最新 Release 和当前版本标签。清理步骤不会在新 Release 创建失败时执行，也不会删除非 `v*` 标签。
 
 ## 签名迁移提醒
 

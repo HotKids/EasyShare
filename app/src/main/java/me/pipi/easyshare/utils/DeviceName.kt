@@ -1,6 +1,7 @@
 package me.pipi.easyshare.utils
 
 import android.os.Build
+import java.util.concurrent.TimeUnit
 
 object DeviceName {
 
@@ -37,12 +38,24 @@ object DeviceName {
         getProp("ro.product.device")
 
     private fun getProp(propName: String): String? {
+        val process = try {
+            Runtime.getRuntime().exec(arrayOf("getprop", propName))
+        } catch (e: Exception) {
+            return null
+        }
+
         return try {
-            val process = Runtime.getRuntime().exec(arrayOf("getprop", propName))
-            process.inputStream.bufferedReader().readLine()
-                ?.takeUnless { it.isBlank() }
+            process.inputStream.bufferedReader().use { reader ->
+                reader.readLine()?.takeUnless { it.isBlank() }
+            }
         } catch (e: Exception) {
             null
+        } finally {
+            runCatching { process.outputStream.close() }
+            runCatching { process.errorStream.close() }
+            if (!runCatching { process.waitFor(250, TimeUnit.MILLISECONDS) }.getOrDefault(false)) {
+                process.destroy()
+            }
         }
     }
 }

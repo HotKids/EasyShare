@@ -55,7 +55,7 @@ class IncomingTransferActivity : ComponentActivity() {
             if (responded.get()) return
             remainingSeconds--
             if (remainingSeconds <= 0) {
-                rejectAndFinish(showTimeout = true)
+                timeoutAndFinish()
                 return
             }
             timeoutHandler.postDelayed(this, 1_000L)
@@ -107,7 +107,7 @@ class IncomingTransferActivity : ComponentActivity() {
                     state = state,
                     remainingSeconds = remainingSeconds,
                     onDismiss = { dismissForState(state) },
-                    onReject = { rejectAndFinish(showTimeout = false) },
+                    onReject = ::rejectAndFinish,
                     onAccept = ::accept,
                     onCancel = ::cancelAndFinish,
                     onClose = ::finish,
@@ -131,7 +131,7 @@ class IncomingTransferActivity : ComponentActivity() {
 
     private fun dismissForState(state: IncomingTransferUiState) {
         when (state.status) {
-            IncomingTransferUiStatus.REQUESTED -> rejectAndFinish(showTimeout = false)
+            IncomingTransferUiStatus.REQUESTED -> rejectAndFinish()
             IncomingTransferUiStatus.RECEIVING -> cancelAndFinish()
             else -> finish()
         }
@@ -144,13 +144,19 @@ class IncomingTransferActivity : ComponentActivity() {
         sendResponse(true)
     }
 
-    private fun rejectAndFinish(showTimeout: Boolean) {
+    private fun rejectAndFinish() {
         if (responded.compareAndSet(false, true)) {
             timeoutHandler.removeCallbacks(countdownRunnable)
             sendResponse(false)
-            if (showTimeout) {
-                Toast.makeText(this, R.string.incoming_transfer_timeout, Toast.LENGTH_SHORT).show()
-            }
+        }
+        finish()
+    }
+
+    private fun timeoutAndFinish() {
+        if (responded.compareAndSet(false, true)) {
+            timeoutHandler.removeCallbacks(countdownRunnable)
+            sendResponse(accepted = false, timedOut = true)
+            Toast.makeText(this, R.string.incoming_transfer_timeout, Toast.LENGTH_SHORT).show()
         }
         finish()
     }
@@ -161,9 +167,9 @@ class IncomingTransferActivity : ComponentActivity() {
         finish()
     }
 
-    private fun sendResponse(accepted: Boolean) {
+    private fun sendResponse(accepted: Boolean, timedOut: Boolean = false) {
         sendBroadcast(
-            P2pReceiverService.getResponseIntent(this, taskId, accepted),
+            P2pReceiverService.getResponseIntent(this, taskId, accepted, timedOut),
             INTERNAL_BROADCAST_PERMISSION,
         )
     }

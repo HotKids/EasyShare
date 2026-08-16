@@ -1,8 +1,8 @@
 package me.pipi.easyshare.utils
 
 import java.nio.ByteBuffer
+import java.security.SecureRandom
 import java.util.Arrays
-import java.util.Random
 import java.util.UUID
 import kotlin.math.abs
 
@@ -20,7 +20,7 @@ object BleUtils {
     val CHAR_P2P_UUID = UUID.fromString("00009953-0000-1000-8000-00805f9b34fb")
 
     val RANDOM_DATA: ByteArray = run {
-        val random = Random()
+        val random = SecureRandom()
         Arrays.copyOfRange(
             ByteBuffer.allocate(8).putLong(abs(random.nextLong())).array(),
             0,

@@ -40,15 +40,18 @@ import io.ktor.websocket.readText
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.select
-import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import me.pipi.easyshare.AppSettings
 import me.pipi.easyshare.BleSecurity
@@ -72,10 +75,13 @@ import me.pipi.easyshare.utils.JsonWithUnknownKeys
 import me.pipi.easyshare.utils.LiveStage
 import me.pipi.easyshare.utils.LiveUpdateCoordinator
 import me.pipi.easyshare.utils.NotificationUtils
+import me.pipi.easyshare.utils.ProgressCounter
 import me.pipi.easyshare.utils.ShizukuUtils
 import me.pipi.easyshare.utils.TAG
 import me.pipi.easyshare.utils.TransferUiCoordinator
 import me.pipi.easyshare.utils.TransferLimits
+import me.pipi.easyshare.utils.RemoteTransferOutcome
+import me.pipi.easyshare.utils.TransferStatusProtocol
 import me.pipi.easyshare.utils.awaitWithTimeout
 import me.pipi.easyshare.utils.createGroupSuspend
 import me.pipi.easyshare.utils.registerInternalBroadcastReceiver
@@ -86,10 +92,12 @@ import no.nordicsemi.android.kotlin.ble.client.main.callback.ClientBleGatt
 import no.nordicsemi.android.kotlin.ble.core.RealServerDevice
 import no.nordicsemi.android.kotlin.ble.core.data.util.DataByteArray
 import org.json.JSONObject
+import java.io.EOFException
 import java.io.File
 import java.security.cert.X509Certificate
 import java.time.Duration
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import java.util.zip.ZipEntry
@@ -98,7 +106,8 @@ import kotlin.random.Random
 
 class P2pSenderService : BaseP2pService() {
     private val binder = LocalBinder()
-    private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    private val serviceJob = SupervisorJob()
+    private val scope = CoroutineScope(Dispatchers.Main + serviceJob)
     private var retainTransferNotification = false
 
     inner class LocalBinder : Binder() {
@@ -107,6 +116,7 @@ class P2pSenderService : BaseP2pService() {
 
     override fun onBind(intent: Intent) = binder
 
+    @Volatile
     private var currentDeviceId: String? = null
 
     private fun updateStage(
@@ -117,6 +127,7 @@ class P2pSenderService : BaseP2pService() {
         currentFile: String? = null,
         partial: Boolean = false,
     ) {
+        val unconfirmedProgress = progress.coerceIn(0, 99)
         currentDeviceId?.let { deviceId ->
             val uiStatus = when (stage) {
                 LiveStage.INIT,
@@ -136,8 +147,9 @@ class P2pSenderService : BaseP2pService() {
                     deviceId = deviceId,
                     status = uiStatus,
                     progress = when (stage) {
-                        LiveStage.TRANSFERRING -> progress.coerceIn(0, 100)
-                        LiveStage.FINALIZING, LiveStage.COMPLETED -> 100
+                        LiveStage.TRANSFERRING -> unconfirmedProgress
+                        LiveStage.FINALIZING -> 99
+                        LiveStage.COMPLETED -> 100
                         else -> 0
                     }
                 )
@@ -169,13 +181,13 @@ class P2pSenderService : BaseP2pService() {
         }
 
         val displayProgress = if (stage == LiveStage.TRANSFERRING) {
-            40 + (progress * 0.5).toInt()
+            40 + (unconfirmedProgress * 0.5).toInt()
         } else {
             stage.progress
         }
 
         val shortText = when (stage) {
-            LiveStage.TRANSFERRING -> "$progress%"
+            LiveStage.TRANSFERRING -> "$unconfirmedProgress%"
             LiveStage.INIT, LiveStage.PREPARING -> getString(R.string.stage_prep)
             LiveStage.HANDSHAKE -> getString(R.string.stage_conn)
             LiveStage.REQUESTED, LiveStage.WAITING_AUTH -> getString(R.string.stage_wait)
@@ -187,7 +199,11 @@ class P2pSenderService : BaseP2pService() {
             title = getString(R.string.sending),
             content = content,
             subText = getString(R.string.outgoing_transfer_to, targetName),
-            progress = if (stage != LiveStage.COMPLETED) displayProgress else -1,
+            progress = if (stage == LiveStage.TRANSFERRING || stage == LiveStage.FINALIZING) {
+                displayProgress
+            } else {
+                -1
+            },
             shortCriticalText = shortText,
             priority = LiveUpdatePriority.CRITICAL,
             ongoing = stage != LiveStage.COMPLETED,
@@ -228,6 +244,7 @@ class P2pSenderService : BaseP2pService() {
         retainTransferNotification = false
     }
 
+    @Volatile
     private var groupInfoFuture = CompletableDeferred<WifiP2pGroup>()
 
     private suspend fun createP2pGroup(config: WifiP2pConfig) {
@@ -394,9 +411,10 @@ class P2pSenderService : BaseP2pService() {
         val securePeerExpected = AtomicBoolean(true)
         val websocketClaimed = AtomicBoolean(false)
         val downloadClaimed = AtomicBoolean(false)
+        val transferActivityNanos = AtomicLong(System.nanoTime())
 
         fun isAuthorized(candidate: String?): Boolean =
-            !securePeerExpected.get() || SessionSecurity.constantTimeEquals(sessionToken, candidate)
+            SessionSecurity.isAuthorized(securePeerExpected.get(), sessionToken, candidate)
 
         val keyAlias = "easyShareSession"
         val keyStorePassword = SessionSecurity.generateToken().take(32)
@@ -481,9 +499,15 @@ class P2pSenderService : BaseP2pService() {
                                 }
                             }
                         } catch (e: Throwable) {
+                            statusFuture.completeExceptionally(e)
                             Log.e(TAG, "WebSocket failed", e)
                             throw e
                         } finally {
+                            if (!statusFuture.isCompleted && !wsCloseFuture.isCompleted) {
+                                statusFuture.completeExceptionally(
+                                    EOFException("WebSocket closed before transfer status"),
+                                )
+                            }
                             outgoing.close()
                         }
                     }
@@ -520,60 +544,73 @@ class P2pSenderService : BaseP2pService() {
                         return@get
                     }
                     if (BuildConfig.DEBUG) Log.d(TAG, "Authorized download connected")
+                    transferActivityNanos.set(System.nanoTime())
                     transferStartFuture.complete(Unit)
                     updateStage(task.id, task.device.name, LiveStage.TRANSFERRING)
 
                     var processedSize = 0L
-                    var lastProgressUpdate = 0L
+                    var currentFileName: String? = null
+                    val progress = ProgressCounter(totalSize) { total, processed ->
+                        val percent = if (total > 0L) {
+                            (100.0 * processed / total).toInt().coerceIn(0, 100)
+                        } else {
+                            0
+                        }
+                        updateStage(
+                            task.id,
+                            task.device.name,
+                            LiveStage.TRANSFERRING,
+                            percent,
+                            currentFileName,
+                        )
+                    }
 
-                    call.respondOutputStream(ContentType.Application.Zip, HttpStatusCode.OK) {
-                        val cr = contentResolver
-                        ZipOutputStream(this).use { zo ->
-                            if (sharedTextContent != null) {
-                                zo.putNextEntry(ZipEntry("0/sharedText.txt"))
-                                zo.write(sharedTextContent.toByteArray(Charsets.UTF_8))
-                                zo.closeEntry()
-                                return@use
-                            }
-
-                            for ((i, rf) in task.files.withIndex()) {
-                                val safeName = File(rf.name).name.takeIf { it.isNotBlank() }
-                                    ?: "shared_file_$i"
-                                val input = cr.openInputStream(rf.uri)
-                                    ?: throw IllegalArgumentException("Shared content is no longer readable")
-                                input.use { ist ->
-                                    zo.putNextEntry(ZipEntry("$i/$safeName"))
-
-                                    val buffer = ByteArray(1024 * 1024 * 4)
-                                    while (true) {
-                                        val readLen = ist.read(buffer)
-                                        if (readLen == -1) break
-                                        zo.write(buffer, 0, readLen)
-                                        processedSize += readLen.toLong()
-
-                                        val now = System.nanoTime()
-                                        if (TimeUnit.SECONDS.convert(now - lastProgressUpdate, TimeUnit.NANOSECONDS) >= 1) {
-                                            val percent = if (totalSize > 0L) {
-                                                (100.0 * processedSize / totalSize).toInt().coerceIn(0, 100)
-                                            } else {
-                                                0
-                                            }
-                                            updateStage(
-                                                task.id,
-                                                task.device.name,
-                                                LiveStage.TRANSFERRING,
-                                                percent,
-                                                safeName,
-                                            )
-                                            lastProgressUpdate = now
-                                        }
-                                    }
-
+                    try {
+                        call.respondOutputStream(ContentType.Application.Zip, HttpStatusCode.OK) {
+                            val cr = contentResolver
+                            ZipOutputStream(this).use { zo ->
+                                if (sharedTextContent != null) {
+                                    currentFileName = "sharedText.txt"
+                                    val textBytes = sharedTextContent.toByteArray(Charsets.UTF_8)
+                                    zo.putNextEntry(ZipEntry("0/sharedText.txt"))
+                                    zo.write(textBytes)
+                                    processedSize += textBytes.size
+                                    transferActivityNanos.set(System.nanoTime())
+                                    progress.complete(processedSize)
                                     zo.closeEntry()
+                                    return@use
                                 }
+
+                                for ((i, rf) in task.files.withIndex()) {
+                                    val safeName = File(rf.name).name.takeIf { it.isNotBlank() }
+                                        ?: "shared_file_$i"
+                                    currentFileName = safeName
+                                    val input = cr.openInputStream(rf.uri)
+                                        ?: throw IllegalArgumentException("Shared content is no longer readable")
+                                    input.use { ist ->
+                                        zo.putNextEntry(ZipEntry("$i/$safeName"))
+
+                                        val buffer = ByteArray(1024 * 1024 * 4)
+                                        while (true) {
+                                            val readLen = ist.read(buffer)
+                                            if (readLen == -1) break
+                                            if (readLen == 0) continue
+                                            zo.write(buffer, 0, readLen)
+                                            processedSize += readLen.toLong()
+                                            transferActivityNanos.set(System.nanoTime())
+                                            progress.update(processedSize)
+                                        }
+
+                                        zo.closeEntry()
+                                    }
+                                }
+                                progress.complete(processedSize)
                             }
                         }
                         transferCompleteFuture.complete(Unit)
+                    } catch (error: Throwable) {
+                        transferCompleteFuture.completeExceptionally(error)
+                        throw error
                     }
                 }
             }
@@ -609,13 +646,24 @@ class P2pSenderService : BaseP2pService() {
             val ssid = "DIRECT-${DeviceUtils.getRandomChars(8)}"
             val psk = DeviceUtils.getRandomChars(8)
 
-            val p2pConfig = WifiP2pConfig.Builder().setGroupOperatingBand(
-                if (task.device.supports5Ghz) {
-                    WifiP2pConfig.GROUP_OWNER_BAND_AUTO
-                } else {
-                    WifiP2pConfig.GROUP_OWNER_BAND_2GHZ
-                }
-            ).setNetworkName(ssid).setPassphrase(psk).enablePersistentMode(false).build()
+            val compatibilityBand = DeviceUtils.requiresTwoGhzP2pCompatibility(
+                task.device.brandId,
+            )
+            val operatingBand = if (task.device.supports5Ghz && !compatibilityBand) {
+                WifiP2pConfig.GROUP_OWNER_BAND_AUTO
+            } else {
+                WifiP2pConfig.GROUP_OWNER_BAND_2GHZ
+            }
+            Log.i(
+                TAG,
+                "Creating P2P group with ${if (operatingBand == WifiP2pConfig.GROUP_OWNER_BAND_2GHZ) "2.4 GHz" else "automatic"} band",
+            )
+            val p2pConfig = WifiP2pConfig.Builder()
+                .setGroupOperatingBand(operatingBand)
+                .setNetworkName(ssid)
+                .setPassphrase(psk)
+                .enablePersistentMode(false)
+                .build()
 
             try {
                 createP2pGroup(p2pConfig)
@@ -711,38 +759,65 @@ class P2pSenderService : BaseP2pService() {
                         "Waiting for start transfer",
                         R.string.error_send_timeout_handshake
                     )
-                    transferCompleteFuture.await()
-                    updateStage(task.id, task.device.name, LiveStage.FINALIZING)
-                    withTimeoutOrNull(5000L) {
-                        statusFuture.await()
+                    val stallWatchdog = launch {
+                        while (!transferCompleteFuture.isCompleted) {
+                            delay(TRANSFER_STALL_POLL_MS)
+                            val idleMs = TimeUnit.NANOSECONDS.toMillis(
+                                System.nanoTime() - transferActivityNanos.get(),
+                            )
+                            if (idleMs >= TRANSFER_STALL_TIMEOUT_MS) {
+                                transferCompleteFuture.completeExceptionally(
+                                    TimeoutException("Transfer stalled for $idleMs ms"),
+                                )
+                                break
+                            }
+                        }
                     }
+                    try {
+                        transferCompleteFuture.await()
+                    } finally {
+                        stallWatchdog.cancel()
+                    }
+                    updateStage(task.id, task.device.name, LiveStage.FINALIZING)
+                    statusFuture.awaitWithTimeout(
+                        Duration.ofSeconds(STATUS_CONFIRMATION_TIMEOUT_SECONDS),
+                        "Waiting for receive confirmation",
+                        R.string.error_send_timeout_handshake,
+                    )
                 }
                 val status = select {
                     statusFuture.onAwait { it }
                     transferJob.onAwait { it }
                 }
 
-                if (status != null) {
-                    if (status.first == 3 && status.second == "user refuse") {
-                        throw CancelledByUserException(true)
+                when (TransferStatusProtocol.classify(status.first, status.second)) {
+                    RemoteTransferOutcome.REJECTED -> throw CancelledByUserException(true)
+                    RemoteTransferOutcome.TIMED_OUT -> {
+                        throw TimeoutException("Remote receive request timed out")
                     }
-                    if (status.first == 1) {
+                    RemoteTransferOutcome.SUCCESS,
+                    RemoteTransferOutcome.PARTIAL -> {
                         delay(1000)
-                        transferJob.cancel()
-                        return@coroutineScope true
+                        if (transferJob.isActive) transferJob.cancel()
+                        return@coroutineScope status.first == TransferStatusProtocol.TYPE_SUCCESS &&
+                            !status.second.equals(
+                                TransferStatusProtocol.REASON_PARTIAL,
+                                ignoreCase = true,
+                            )
                     }
-                    throw RuntimeException("Transfer terminated with $status")
-                } else {
-                    throw TimeoutException("Status timed out")
+                    RemoteTransferOutcome.FAILED -> Unit
                 }
+                throw RuntimeException("Transfer terminated with $status")
             } finally {
-                try {
-                    val activeGroup = p2pManager.requestGroupInfo(p2pChannel)
-                    if (activeGroup != null) {
-                        p2pManager.removeGroupSuspend(p2pChannel)
+                withContext(NonCancellable) {
+                    try {
+                        val activeGroup = p2pManager.requestGroupInfo(p2pChannel)
+                        if (activeGroup != null) {
+                            p2pManager.removeGroupSuspend(p2pChannel)
+                        }
+                    } catch (e: Throwable) {
+                        Log.w(TAG, "Failed to remove P2P group", e)
                     }
-                } catch (e: Throwable) {
-                    Log.w(TAG, "Failed to remove P2P group", e)
                 }
             }
         } finally {
@@ -753,24 +828,30 @@ class P2pSenderService : BaseP2pService() {
 
     @SuppressLint("MissingPermission")
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent == null) return START_NOT_STICKY
+        if (intent == null) {
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
 
         if (!MyApplication.getInstance().setBusy()) {
             Log.i(TAG, "Application is busy, skipping")
             NotificationUtils.showBusyToast(this)
+            val hasActiveTask = synchronized(currentTaskLock) { currentJob?.isActive == true }
+            if (!hasActiveTask) stopSelf(startId)
             return START_NOT_STICKY
         }
 
         @Suppress("DEPRECATION")
         val task = intent.getParcelableExtra<TaskInfo>("task") ?: run {
             MyApplication.getInstance().clearBusy()
+            stopSelf(startId)
             return START_NOT_STICKY
         }
 
         currentDeviceId = task.device.id
         retainTransferNotification = false
 
-        val job = scope.launch(Dispatchers.IO) {
+        val job = scope.launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
             try {
                 updateStage(task.id, task.device.name, LiveStage.PREPARING)
                 val completedFully = runTask(task)
@@ -836,6 +917,7 @@ class P2pSenderService : BaseP2pService() {
             currentTaskId = task.id
             currentJob = job
         }
+        job.start()
 
         return START_NOT_STICKY
     }
@@ -904,7 +986,7 @@ class P2pSenderService : BaseP2pService() {
             internalReceiverRegistered = false
         }
         LiveUpdateCoordinator.clearState("SENDER")
-        currentJob?.cancel()
+        scope.cancel()
         super.onDestroy()
     }
 
@@ -912,6 +994,9 @@ class P2pSenderService : BaseP2pService() {
         private const val MAX_P2P_CREATE_ATTEMPTS = 10
         private const val P2P_CREATE_RETRY_DELAY_MS = 1_000L
         private const val P2P_GROUP_REMOVAL_SETTLE_MS = 1_000L
+        private const val TRANSFER_STALL_POLL_MS = 1_000L
+        private const val TRANSFER_STALL_TIMEOUT_MS = 30_000L
+        private const val STATUS_CONFIRMATION_TIMEOUT_SECONDS = 30L
         private const val MAX_WEBSOCKET_FRAME_BYTES = 3L * 1024 * 1024
 
         val TAG: String = P2pSenderService::class.java.simpleName

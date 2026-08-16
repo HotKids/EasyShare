@@ -44,10 +44,12 @@ import io.ktor.websocket.readText
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.ClosedReceiveChannelException
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -74,6 +76,7 @@ import me.pipi.easyshare.models.ReceivedFile
 import me.pipi.easyshare.models.WebSocketMessage
 import me.pipi.easyshare.utils.DeviceUtils
 import me.pipi.easyshare.utils.BleUtils
+import me.pipi.easyshare.utils.ArchiveEntryNames
 import me.pipi.easyshare.utils.LiveStage
 import me.pipi.easyshare.utils.LiveUpdateCoordinator
 import me.pipi.easyshare.utils.IncomingTransferUiCoordinator
@@ -82,6 +85,7 @@ import me.pipi.easyshare.utils.ProgressCounter
 import me.pipi.easyshare.utils.TAG
 import me.pipi.easyshare.utils.TransferLimitException
 import me.pipi.easyshare.utils.TransferLimits
+import me.pipi.easyshare.utils.TransferStatusProtocol
 import me.pipi.easyshare.utils.ZipPathValidatorCallback
 import me.pipi.easyshare.utils.awaitP2pNetwork
 import me.pipi.easyshare.utils.awaitWithTimeout
@@ -106,8 +110,15 @@ import kotlin.math.min
 import kotlin.random.Random
 
 class P2pReceiverService : BaseP2pService() {
+    private enum class IncomingRequestDecision {
+        ACCEPTED,
+        REJECTED,
+        TIMED_OUT,
+    }
+
     private lateinit var notificationManager: NotificationManagerCompat
-    private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    private val serviceJob = SupervisorJob()
+    private val scope = CoroutineScope(Dispatchers.Main + serviceJob)
     private var retainTransferNotification = false
 
     private fun updateStage(
@@ -252,18 +263,18 @@ class P2pReceiverService : BaseP2pService() {
         super.onCreate()
 
         Log.d(TAG, "onCreate")
+        notificationManager = NotificationManagerCompat.from(this)
 
         if (!checkP2pPermissions()) {
             stopSelf()
             return
         }
 
-        notificationManager = NotificationManagerCompat.from(this)
-
         registerInternalBroadcastReceiver(internalReceiver, IntentFilter(ACTION_CANCEL_RECEIVING))
         internalReceiverRegistered = true
     }
 
+    @Volatile
     private var p2pFuture = CompletableDeferred<Pair<WifiP2pInfo, WifiP2pGroup>>()
 
     @Suppress("DEPRECATION")
@@ -289,7 +300,6 @@ class P2pReceiverService : BaseP2pService() {
     private val currentTaskLock = Any()
     private var currentJob: Job? = null
     private var currentTaskId: Int? = null
-    private var currentSenderName: String? = null
 
     override fun onBind(intent: Intent): IBinder? {
         return null
@@ -299,39 +309,44 @@ class P2pReceiverService : BaseP2pService() {
     @Suppress("DEPRECATION")
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent == null) {
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
+
+        if (!checkP2pPermissions()) {
+            stopSelf(startId)
             return START_NOT_STICKY
         }
 
         if (!MyApplication.getInstance().setBusy()) {
             Log.i(TAG, "Application is busy, skipping")
             NotificationUtils.showBusyToast(this)
+            val hasActiveTask = synchronized(currentTaskLock) { currentJob?.isActive == true }
+            if (!hasActiveTask) stopSelf(startId)
             return START_NOT_STICKY
         }
 
         val info = intent.getParcelableExtra<P2pInfo>("p2p_info") ?: run {
             MyApplication.getInstance().clearBusy()
+            stopSelf(startId)
             return START_NOT_STICKY
         }
 
         val localTaskId = Random.nextInt()
         retainTransferNotification = false
         IncomingTransferUiCoordinator.clearAll()
-        val job = scope.launch(Dispatchers.IO) {
+        val job = scope.launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
             try {
                 updateStage(localTaskId, getString(R.string.device), LiveStage.INIT)
                 runReceive(info, localTaskId)
             } catch (e: CancelledByUserException) {
                 Log.i(TAG, "Cancelled by user")
-                IncomingTransferUiCoordinator.fail(
-                    localTaskId,
-                    if (e.isRemote) {
-                        getString(R.string.cancelled_by_user_remote)
-                    } else {
-                        getString(R.string.cancelled_by_user_local)
-                    },
-                    canceled = true,
-                )
                 if (e.isRemote) {
+                    IncomingTransferUiCoordinator.fail(
+                        localTaskId,
+                        getString(R.string.cancelled_by_user_remote),
+                        canceled = true,
+                    )
                     showTransferResult(createFailedNotification(e))
                 } else {
                     removeTransferNotification()
@@ -366,7 +381,6 @@ class P2pReceiverService : BaseP2pService() {
                 synchronized(currentTaskLock) {
                     currentTaskId = null
                     currentJob = null
-                    currentSenderName = null
                 }
                 stopSelf()
             }
@@ -376,6 +390,7 @@ class P2pReceiverService : BaseP2pService() {
             currentTaskId = localTaskId
             currentJob = job
         }
+        job.start()
 
 
         return START_NOT_STICKY
@@ -580,7 +595,6 @@ class P2pReceiverService : BaseP2pService() {
                     val senderName = BleUtils.normalizeDeviceName(
                         sendRequestPayload.getString("senderName"),
                     )
-                    currentSenderName = senderName
                     val senderBrandId = sendRequestPayload.optInt("senderBrandId", -1)
                         .takeIf { it >= 0 }
                     val rawSenderBrand = if (sendRequestPayload.has("senderBrand")) {
@@ -676,9 +690,27 @@ class P2pReceiverService : BaseP2pService() {
                             waitForAction(localTaskId)
                         }
 
-                        if (userResponse != true) {
-                            wsSession.sendStatusIgnoreException(99, taskId, 3, "user refuse")
-                            throw CancelledByUserException(false)
+                        when (userResponse) {
+                            IncomingRequestDecision.ACCEPTED -> Unit
+                            IncomingRequestDecision.REJECTED -> {
+                                wsSession.sendStatusIgnoreException(
+                                    99,
+                                    taskId,
+                                    3,
+                                    TransferStatusProtocol.REASON_USER_REFUSED,
+                                )
+                                throw CancelledByUserException(false)
+                            }
+                            IncomingRequestDecision.TIMED_OUT,
+                            null -> {
+                                wsSession.sendStatusIgnoreException(
+                                    99,
+                                    taskId,
+                                    3,
+                                    TransferStatusProtocol.REASON_TIMEOUT,
+                                )
+                                throw CancellationException("Incoming request timed out")
+                            }
                         }
                         IncomingTransferUiCoordinator.markReceiving(localTaskId)
                     }
@@ -723,8 +755,6 @@ class P2pReceiverService : BaseP2pService() {
                             )
                         }
 
-                        updateStage(localTaskId, senderDisplayName, LiveStage.FINALIZING)
-
                         ZipInputStream(ist).use { zipStream ->
                             saveArchive(
                                 zipStream = zipStream,
@@ -737,21 +767,28 @@ class P2pReceiverService : BaseP2pService() {
                             }
                         }
                     }
+                    updateStage(localTaskId, senderDisplayName, LiveStage.FINALIZING)
 
                     if (files.isNotEmpty()) {
+                        val isPartial = files.size != fileCount
                         showTransferResult(
                             createCompletedNotification(
                                 senderName,
                                 files,
-                                files.size != fileCount,
+                                isPartial,
                             ),
                         )
                         IncomingTransferUiCoordinator.complete(
                             localTaskId,
                             files = files,
-                            partial = files.size != fileCount,
+                            partial = isPartial,
                         )
-                        wsSession.sendStatusIgnoreException(99, taskId, 1, "ok")
+                        wsSession.sendStatusIgnoreException(
+                            99,
+                            taskId,
+                            1,
+                            if (isPartial) STATUS_REASON_PARTIAL else STATUS_REASON_OK,
+                        )
                         delay(1000)
                     } else {
                         throw IllegalStateException("Failed to receive any file")
@@ -867,55 +904,66 @@ class P2pReceiverService : BaseP2pService() {
         val receivedFiles = mutableListOf<ReceivedFile>()
         var processedSize = 0L
         val maxActualBytes = TransferLimits.maxActualBytes(expectedTotalSize)
+        val platformValidatorInstalled = Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+        if (platformValidatorInstalled) {
             dalvik.system.ZipPathValidator.setCallback(ZipPathValidatorCallback)
         }
 
-        val customDir = getCustomDownloadDir()
+        try {
+            val customDir = getCustomDownloadDir()
 
-        while (true) {
-            val entry = zipStream.nextEntry ?: break
-            if (entry.isDirectory) {
-                continue
-            }
-            if (receivedFiles.size >= expectedFileCount ||
-                receivedFiles.size >= TransferLimits.MAX_FILE_COUNT
-            ) {
-                throw TransferLimitException("Archive contains too many files")
-            }
-
-            val safeName = File(entry.name).name
-                .takeIf { it.isNotBlank() && it != "." && it != ".." }
-                ?: throw TransferLimitException("Archive contains an invalid file name")
-            if (BuildConfig.DEBUG) Log.d(TAG, "Receiving archive entry")
-            onFileStart(safeName)
-
-            val entryFile = File(safeName)
-            
-            try {
-                var customDocument: DocumentFile? = null
-                var mediaStoreUri: Uri? = null
-                val (uri, mimeType) = if (customDir != null) {
-                    val extension = entryFile.extension
-                    val mime = if (extension.isNotEmpty()) {
-                        MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension) ?: "application/octet-stream"
-                    } else "application/octet-stream"
-                    
-                    val doc = customDir.createFile(mime, entryFile.name)
-                        ?: throw RuntimeException("Failed to create file ${entryFile.name} in custom dir")
-                    customDocument = doc
-                    Pair(doc.uri, mime)
-                } else {
-                    val values = createContentValues(entryFile)
-                    val insertedUri = contentResolver.insert(
-                        MediaStore.Downloads.EXTERNAL_CONTENT_URI, values
-                    ) ?: throw RuntimeException("Failed to write ${entryFile.name} to media store")
-                    mediaStoreUri = insertedUri
-                    Pair(insertedUri, values.getAsString(MediaStore.Downloads.MIME_TYPE))
+            while (true) {
+                val entry = zipStream.nextEntry ?: break
+                if (entry.isDirectory) {
+                    zipStream.closeEntry()
+                    continue
+                }
+                if (receivedFiles.size >= expectedFileCount ||
+                    receivedFiles.size >= TransferLimits.MAX_FILE_COUNT
+                ) {
+                    throw TransferLimitException("Archive contains too many files")
                 }
 
+                val safeName = try {
+                    ArchiveEntryNames.safeFileName(entry.name)
+                } catch (error: IllegalArgumentException) {
+                    throw TransferLimitException("Archive contains an invalid file name")
+                }
+                if (BuildConfig.DEBUG) Log.d(TAG, "Receiving archive entry")
+                onFileStart(safeName)
+
+                val entryFile = File(safeName)
+                var customDocument: DocumentFile? = null
+                var mediaStoreUri: Uri? = null
                 try {
+                    val (uri, mimeType) = if (customDir != null) {
+                        val extension = entryFile.extension
+                        val mime = if (extension.isNotEmpty()) {
+                            MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
+                                ?: "application/octet-stream"
+                        } else {
+                            "application/octet-stream"
+                        }
+
+                        val doc = customDir.createFile(mime, entryFile.name)
+                            ?: throw RuntimeException(
+                                "Failed to create file ${entryFile.name} in custom dir",
+                            )
+                        customDocument = doc
+                        Pair(doc.uri, mime)
+                    } else {
+                        val values = createContentValues(entryFile)
+                        val insertedUri = contentResolver.insert(
+                            MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                            values,
+                        ) ?: throw RuntimeException(
+                            "Failed to write ${entryFile.name} to media store",
+                        )
+                        mediaStoreUri = insertedUri
+                        Pair(insertedUri, values.getAsString(MediaStore.Downloads.MIME_TYPE))
+                    }
+
                     val os = contentResolver.openOutputStream(uri)
                         ?: throw RuntimeException("Failed to open ${entryFile.name}")
                     val buffer = ByteArray(1024 * 1024)
@@ -977,17 +1025,31 @@ class P2pReceiverService : BaseP2pService() {
                     mediaStoreUri?.let { contentResolver.delete(it, null, null) }
                     throw e
                 }
-            } catch (e: Throwable) {
-                if (e is TransferLimitException) throw e
-                Log.e(TAG, "Failed to receive archive entry, stopping", e)
-                break
+                zipStream.closeEntry()
             }
-            zipStream.closeEntry()
+
+            progress.complete(processedSize)
+            if (receivedFiles.size != expectedFileCount) {
+                throw EOFException(
+                    "Archive ended after ${receivedFiles.size} of $expectedFileCount files",
+                )
+            }
+            if (BuildConfig.DEBUG) Log.d(TAG, "Received ${receivedFiles.size} files")
+
+            return receivedFiles
+        } catch (error: Throwable) {
+            receivedFiles.forEach { receivedFile ->
+                runCatching { contentResolver.delete(receivedFile.uri, null, null) }
+                    .onFailure { cleanupError ->
+                        Log.w(TAG, "Failed to remove an incomplete transfer artifact", cleanupError)
+                    }
+            }
+            throw error
+        } finally {
+            if (platformValidatorInstalled) {
+                dalvik.system.ZipPathValidator.clearCallback()
+            }
         }
-
-        if (BuildConfig.DEBUG) Log.d(TAG, "Received ${receivedFiles.size} files")
-
-        return receivedFiles
     }
 
     private suspend fun waitForAction(taskId: Int) = suspendCancellableCoroutine { continuation ->
@@ -1013,11 +1075,21 @@ class P2pReceiverService : BaseP2pService() {
                 when (intent.action) {
                     ACTION_ACCEPTED -> {
                         unregister()
-                        if (continuation.isActive) continuation.resume(true) { _, _, _ -> }
+                        if (continuation.isActive) {
+                            continuation.resume(IncomingRequestDecision.ACCEPTED) { _, _, _ -> }
+                        }
                     }
                     ACTION_DISMISSED -> {
                         unregister()
-                        if (continuation.isActive) continuation.resume(false) { _, _, _ -> }
+                        if (continuation.isActive) {
+                            continuation.resume(IncomingRequestDecision.REJECTED) { _, _, _ -> }
+                        }
+                    }
+                    ACTION_TIMED_OUT -> {
+                        unregister()
+                        if (continuation.isActive) {
+                            continuation.resume(IncomingRequestDecision.TIMED_OUT) { _, _, _ -> }
+                        }
                     }
                 }
             }
@@ -1026,6 +1098,7 @@ class P2pReceiverService : BaseP2pService() {
         val filter = IntentFilter().apply {
             addAction(ACTION_ACCEPTED)
             addAction(ACTION_DISMISSED)
+            addAction(ACTION_TIMED_OUT)
         }
         registerInternalBroadcastReceiver(receiver, filter)
 
@@ -1042,7 +1115,7 @@ class P2pReceiverService : BaseP2pService() {
 
     override fun onDestroy() {
         LiveUpdateCoordinator.clearState("RECEIVER")
-        currentJob?.cancel()
+        scope.cancel()
 
         if (internalReceiverRegistered) {
             unregisterReceiver(internalReceiver)
@@ -1065,14 +1138,26 @@ class P2pReceiverService : BaseP2pService() {
         private const val INCOMING_REQUEST_TIMEOUT_MS = 60_000L
         private const val EXPLICIT_P2P_NETWORK_API = 37
         private const val P2P_ROUTE_SETTLE_MS = 500L
+        private const val STATUS_REASON_OK = TransferStatusProtocol.REASON_OK
+        private const val STATUS_REASON_PARTIAL = TransferStatusProtocol.REASON_PARTIAL
         fun getIntent(context: Context, p2pInfo: P2pInfo): Intent {
             return Intent(context, P2pReceiverService::class.java).apply {
                 putExtra("p2p_info", p2pInfo)
             }
         }
 
-        fun getResponseIntent(context: Context, taskId: Int, accepted: Boolean): Intent {
-            return Intent(if (accepted) ACTION_ACCEPTED else ACTION_DISMISSED).apply {
+        fun getResponseIntent(
+            context: Context,
+            taskId: Int,
+            accepted: Boolean,
+            timedOut: Boolean = false,
+        ): Intent {
+            val action = when {
+                accepted -> ACTION_ACCEPTED
+                timedOut -> ACTION_TIMED_OUT
+                else -> ACTION_DISMISSED
+            }
+            return Intent(action).apply {
                 setPackage(context.packageName)
                 putExtra("taskId", taskId)
             }
@@ -1090,6 +1175,7 @@ class P2pReceiverService : BaseP2pService() {
 
         private val ACTION_DISMISSED = "${BuildConfig.APPLICATION_ID}.NOTIFICATION_DISMISSED"
         private val ACTION_ACCEPTED = "${BuildConfig.APPLICATION_ID}.NOTIFICATION_ACCEPTED"
+        private val ACTION_TIMED_OUT = "${BuildConfig.APPLICATION_ID}.NOTIFICATION_TIMED_OUT"
         private val ACTION_CANCEL_RECEIVING = "${BuildConfig.APPLICATION_ID}.CANCEL_RECEIVING"
     }
 }

@@ -19,5 +19,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "CatShare"
+rootProject.name = "EasyShare"
 include(":app")

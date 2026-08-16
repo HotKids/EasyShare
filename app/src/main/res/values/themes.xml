@@ -1,9 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
 
-    <style name="Theme.CatShare" parent="android:Theme.Material.Light.NoActionBar" />
+    <style name="Theme.EasyShare" parent="Theme.Material3.DynamicColors.DayNight.NoActionBar" />
 
-    <style name="Theme.Transparent" parent="android:Theme">
+    <style name="Theme.EasyShare.ShareSheet" parent="Theme.EasyShare">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:backgroundDimEnabled">true</item>
+        <item name="android:backgroundDimAmount">0.18</item>
+        <item name="android:windowDisablePreview">true</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+
+    <style name="Theme.EasyShare.Transparent" parent="Theme.EasyShare">
         <item name="android:windowIsTranslucent">true</item>
         <item name="android:windowBackground">@android:color/transparent</item>
         <item name="android:windowContentOverlay">@null</item>

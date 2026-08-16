@@ -1,71 +1,55 @@
-# CatShare
-类原生 & 海外设备，现已加入互传联盟。
+# Easy Share
 
-Android 目前已不再支持非系统应用获取手机的 MAC 地址等无法重置的序列号，但由于各品牌的互传功能通常为系统应用，互传联盟协议将设备的 MAC 地址作为其认证信息的一部分，目前暂时无法绕过。
+[![Android CI](https://github.com/HotKids/EasyShare/actions/workflows/android.yml/badge.svg)](https://github.com/HotKids/EasyShare/actions/workflows/android.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Android 12+](https://img.shields.io/badge/Android-12%2B-3DDC84.svg)](https://developer.android.com/about/versions/12)
 
-本 App 的 GitHub Release 和 F-Droid 版本签名一致， F-Droid 版本可能相对滞后，可以任意选择。
+Easy Share 是一款面向 Android 设备的本地文件互传应用，通过蓝牙发现设备，并使用 Wi‑Fi Direct 建立高速点对点连接。传输在设备之间直接完成，不依赖云端中转。
 
-[<img src="https://f-droid.org/badge/get-it-on-zh-cn.png"
-    alt="Get it on F-Droid"
-    height="80">](https://f-droid.org/packages/moe.reimu.catshare)
-[<img src="https://www.openapk.net/images/openapk-badge.png"
-    alt="Get it on OpenAPK"
-    height="80">](https://www.openapk.net/catshare/moe.reimu.catshare/)
-[<img src="https://www.androidfreeware.net/images/androidfreeware-badge.png"
-    alt="Get it on Android Freeware"
-    height="80">](https://www.androidfreeware.net/download-catshare-apk.html)
+> Easy Share 基于 [kmod-midori/CatShare](https://github.com/kmod-midori/CatShare) 开发，并在 Codex 协助下完成全面重构。项目在保留互传联盟兼容能力的基础上，重新设计了界面、交互与传输流程，并增强了设备识别、传输稳定性与安全性。感谢 CatShare 原作者及所有贡献者。
 
 ## 功能
-- [x] 蓝牙发现
-- [x] 文件接收
-- [x] 文件发送（需要 Shizuku 支持）
-- [x] 文本传输（两侧均为 CatShare 时复制至剪贴板，接收方为其他设备时以文本文件形式发送） 
 
-## 支持设备（已测试）
-| 品牌        | 向该设备发送 | 从该设备接收            |
-| ----------- | ------------ | ----------------------- |
-| 小米        | Y            | Y                       |
-| OPPO/一加等 | Y            | Y，但发送端提示接收失败 |
-| vivo        | Y            | Y                       |
+- 支持单文件、多文件和文本分享
+- 兼容互传联盟 BLE/GATT 发现与协商流程
+- 使用 Wi‑Fi Direct、HTTPS 和 WebSocket 完成点对点传输
+- 支持接收确认、拒绝、取消、进度显示和结果通知
+- 自动识别 Pixel、Samsung、Xiaomi、Redmi、OnePlus、OPPO、vivo、Meizu 等设备品牌
+- 支持自定义设备名称、品牌和下载位置
+- 提供“互传联盟”快速设置磁贴
+- 发送前通过 Shizuku 获取本机 P2P MAC 地址
+- 会话级 TLS 证书校验、随机令牌和安全传输元数据
+- 针对 Android 16/17 及不同厂商 Wi‑Fi Direct 路由行为做了兼容处理
 
-## 汇报问题
+## 使用要求
 
-你可以在该项目的 issue 区汇报你在使用 CatShare 期间遇到的问题，尽量的，请附上 CatShare 的 adb logcat 日志。
+- Android 12（API 31）或更高版本
+- 发送和接收双方均需开启 Wi‑Fi 与蓝牙
+- 发送文件前必须启动 Shizuku 并完成授权，用于获取本机 Wi‑Fi Direct MAC 地址；仅接收文件不依赖 Shizuku
+- 默认接收目录为 `Downloads/Easy Share`
 
-通过该命令获取 CatShare 的日志。
-<details>
-<summary>release(正式版)</summary>
+## 本地构建
 
-shell(linux)
-```shell
-adb logcat --pid $(adb shell pidof -s moe.reimu.catshare)
-```
-cmd(windows)
-```shell
-for /f "tokens=1" %i in ('adb shell pidof -s moe.reimu.catshare') do adb logcat --pid %i
-```
-</details>
-<details>
-<summary>debug(测试版)</summary>
+项目使用 Gradle Wrapper，建议使用 JDK 21：
 
-shell(linux)
-```shell
-adb logcat --pid $(adb shell pidof -s moe.reimu.catshare.debug)
-```
-cmd(windows)
-```shell
-for /f "tokens=1" %i in ('adb shell pidof -s moe.reimu.catshare.debug') do adb logcat --pid %i
-```
-</details>
-建议尽可能完整的截取日志，并注释从什么时候发送或接收内容，尽量使用折叠块语法来包裹日志内容。
-
-````markdown
-<details>
-<summary>Details</summary>
-
-```
-在此处填入日志内容，注意其应被包裹在反括号代码块内
+```bash
+./gradlew testDebugUnitTest lintDebug assembleDebug
 ```
 
-</details>
-````
+Release 构建默认生成未签名 APK。正式包由 GitHub Actions 从仓库 Secrets 临时恢复 release keystore 后完成签名，私钥不会进入仓库或构建产物。
+
+## 自动发布
+
+- 推送到 `main`：执行测试、Lint、Release 构建，并生成正式签名 APK artifact
+- 创建 `v*` 标签：在完成验证和签名后自动创建 GitHub Release
+- 产物包含通用版和仅保留 `arm64-v8a` 的精简版 APK，并附带 SHA-256 校验文件
+
+详细流程见 [发布说明](docs/RELEASING.md)。
+
+## 参与贡献
+
+提交代码前请阅读 [贡献指南](CONTRIBUTING.md)。安全问题请按 [安全策略](SECURITY.md) 私下报告。
+
+## 开源许可
+
+本项目基于 MIT License 发布，并保留 CatShare 原项目的版权声明。详见 [LICENSE](LICENSE)。

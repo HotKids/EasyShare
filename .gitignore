@@ -1,13 +1,23 @@
 *.iml
-.gradle
+.gradle/
 /local.properties
-/.idea
+/.idea/
 .DS_Store
-/build
-/captures
-.externalNativeBuild
-.cxx
-local.properties
+/build/
+/captures/
+.externalNativeBuild/
+.cxx/
 
-keystore.jks
+# Signing material must never be committed.
+*.jks
+*.keystore
+*.p12
 signing.properties
+
+# Generated Android packages and local verification artifacts.
+*.apk
+*.aab
+/app/release/
+/release/
+/verification/
+*.log

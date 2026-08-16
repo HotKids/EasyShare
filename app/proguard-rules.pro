@@ -24,10 +24,13 @@
 
 -keepattributes LineNumberTable,SourceFile
 -renamesourcefileattribute SourceFile
--keepattributes Signature,InnerClasses
+-keepattributes Signature,InnerClasses,*Annotation*
 
--keep class moe.reimu.catshare.** { *; }
-
+# The transfer stack uses runtime reflection and name-based protocol adapters across
+# application, Ktor, Netty, and coroutine classes. These keeps are required for release
+# interoperability with alliance devices.
+-keep class me.pipi.easyshare.** { *; }
+-keep class org.libpag.** { *; }
 -keep class io.netty.** { *; }
 -keep class io.ktor.** { *; }
 -keep class kotlinx.coroutines.** { *; }
@@ -134,3 +137,17 @@
 -dontwarn io.netty.pkitesting.CertificateBuilder$Algorithm
 -dontwarn io.netty.pkitesting.CertificateBuilder
 -dontwarn io.netty.pkitesting.X509Bundle
+
+# Missing classes detected in release build
+-dontwarn io.netty.internal.tcnative.SSLCredential
+-dontwarn javax.naming.ldap.LdapName
+-dontwarn javax.naming.ldap.Rdn
+-dontwarn jdk.jfr.Category
+-dontwarn jdk.jfr.DataAmount
+-dontwarn jdk.jfr.Description
+-dontwarn jdk.jfr.Enabled
+-dontwarn jdk.jfr.Event
+-dontwarn jdk.jfr.FlightRecorder
+-dontwarn jdk.jfr.Label
+-dontwarn jdk.jfr.MemoryAddress
+-dontwarn jdk.jfr.Name

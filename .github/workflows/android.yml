@@ -1,0 +1,153 @@
+name: Android CI
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Test, lint and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
+
+      - name: Install Android SDK packages
+        run: sdkmanager "platforms;android-37" "build-tools;37.0.0"
+
+      - name: Run tests, lint and release build
+        run: ./gradlew testDebugUnitTest lintDebug assembleRelease --no-daemon
+
+      - name: Upload verification reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: verification-reports
+          path: |
+            app/build/reports/tests/
+            app/build/reports/lint-results-debug.*
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Check signing configuration
+        if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+        env:
+          KEYSTORE_BASE64: ${{ secrets.EASY_SHARE_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.EASY_SHARE_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.EASY_SHARE_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.EASY_SHARE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$KEYSTORE_BASE64"
+          test -n "$KEYSTORE_PASSWORD"
+          test -n "$KEY_ALIAS"
+          test -n "$KEY_PASSWORD"
+
+      - name: Sign release APKs
+        if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+        env:
+          KEYSTORE_BASE64: ${{ secrets.EASY_SHARE_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.EASY_SHARE_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.EASY_SHARE_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.EASY_SHARE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          signing_dir="$(mktemp -d)"
+          trap 'rm -rf "$signing_dir"' EXIT
+          keystore_path="$signing_dir/easy-share-release.jks"
+          unsigned_apk="app/build/outputs/apk/release/app-release-unsigned.apk"
+          build_tools="$ANDROID_HOME/build-tools/37.0.0"
+
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$keystore_path"
+          chmod 600 "$keystore_path"
+          mkdir -p release
+
+          cp "$unsigned_apk" "$signing_dir/universal-unsigned.apk"
+          cp "$unsigned_apk" "$signing_dir/arm64-unsigned.apk"
+          zip -q -d "$signing_dir/arm64-unsigned.apk" \
+            'lib/armeabi/*' 'lib/armeabi-v7a/*' 'lib/x86/*' 'lib/x86_64/*'
+
+          "$build_tools/zipalign" -f 4 \
+            "$signing_dir/universal-unsigned.apk" "$signing_dir/universal-aligned.apk"
+          "$build_tools/zipalign" -f 4 \
+            "$signing_dir/arm64-unsigned.apk" "$signing_dir/arm64-aligned.apk"
+
+          "$build_tools/apksigner" sign \
+            --ks "$keystore_path" \
+            --ks-key-alias "$KEY_ALIAS" \
+            --ks-pass env:KEYSTORE_PASSWORD \
+            --key-pass env:KEY_PASSWORD \
+            --out release/easy-share-universal.apk \
+            "$signing_dir/universal-aligned.apk"
+          "$build_tools/apksigner" sign \
+            --ks "$keystore_path" \
+            --ks-key-alias "$KEY_ALIAS" \
+            --ks-pass env:KEYSTORE_PASSWORD \
+            --key-pass env:KEY_PASSWORD \
+            --out release/easy-share-arm64.apk \
+            "$signing_dir/arm64-aligned.apk"
+
+          "$build_tools/apksigner" verify --verbose release/easy-share-universal.apk
+          "$build_tools/apksigner" verify --verbose release/easy-share-arm64.apk
+          (cd release && sha256sum easy-share-*.apk > SHA256SUMS)
+
+      - name: Upload signed APKs
+        if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: easy-share-${{ github.ref_name }}
+          path: release/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download signed APKs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: easy-share-${{ github.ref_name }}
+          path: release
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --generate-notes \
+            --title "Easy Share $GITHUB_REF_NAME"

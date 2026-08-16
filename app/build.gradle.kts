@@ -1,5 +1,5 @@
+
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
-import java.util.Properties
 
 plugins {
     alias(libs.plugins.android.application)
@@ -9,40 +9,15 @@ plugins {
 }
 
 android {
-    namespace = "moe.reimu.catshare"
-    compileSdk = 36
+    namespace = "me.pipi.easyshare"
+    compileSdk = 37
 
     defaultConfig {
-        applicationId = "moe.reimu.catshare"
-        minSdk = 29
-        targetSdk = 36
-        versionCode = 7
-        versionName = "1.6"
-    }
-
-    signingConfigs {
-        create("release") {
-            file("../signing.properties").let { propFile ->
-                if (propFile.canRead()) {
-                    val properties = Properties()
-                    properties.load(propFile.inputStream())
-
-                    storeFile = file(properties.getProperty("KEYSTORE_FILE"))
-                    storePassword = properties.getProperty("KEYSTORE_PASSWORD")
-                    keyAlias = properties.getProperty("SIGNING_KEY_ALIAS")
-                    keyPassword = properties.getProperty("SIGNING_KEY_PASSWORD")
-                } else {
-                    println("Unable to read signing.properties")
-                }
-            }
-        }
-    }
-
-    dependenciesInfo {
-        // Disables dependency metadata when building APKs.
-        includeInApk = false
-        // Disables dependency metadata when building Android App Bundles.
-        includeInBundle = false
+        applicationId = "me.pipi.easyshare"
+        minSdk = 31
+        targetSdk = 37
+        versionCode = 1
+        versionName = "0.1"
     }
 
     buildTypes {
@@ -54,17 +29,14 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-
-            signingConfig = signingConfigs.findByName("release")
+            matchingFallbacks += listOf()
         }
         debug {
-            applicationIdSuffix = ".debug"
-            resValue("string", "app_name", "CatShare (Debug)")
         }
     }
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_11
-        targetCompatibility = JavaVersion.VERSION_11
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
     buildFeatures {
         compose = true
@@ -77,29 +49,31 @@ android {
         resources {
             excludes += "META-INF/INDEX.LIST"
             excludes += "META-INF/*.properties"
+            excludes += "META-INF/native-image/**"
+            excludes += "org/fusesource/jansi/internal/native/**"
         }
     }
 }
 
 kotlin {
     compilerOptions {
-        jvmTarget = JvmTarget.JVM_11
+        jvmTarget = JvmTarget.JVM_17
     }
 }
 
 dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.androidx.lifecycle.runtime.compose)
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.activity.compose)
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.ui)
     implementation(libs.androidx.ui.graphics)
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
-    implementation(libs.androidx.compose.material.icons.extended)
-
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
-    implementation("no.nordicsemi.android.kotlin.ble:client:1.3.1")
+    implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.client)
 
     implementation(libs.ktor.client.core)
     implementation(libs.ktor.client.okhttp)
@@ -114,9 +88,13 @@ dependencies {
     implementation(libs.androidx.appcompat)
     implementation(libs.material)
     implementation(libs.androidx.activity)
+    implementation(libs.androidx.documentfile)
 
     implementation(libs.shizuku.api)
     implementation(libs.shizuku.provider)
+    implementation(libs.libpag)
+
+    testImplementation(libs.junit4)
 
     debugImplementation(libs.androidx.ui.tooling)
     debugImplementation(libs.androidx.ui.test.manifest)

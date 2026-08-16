@@ -5,14 +5,16 @@
     <uses-permission
         android:name="android.permission.NEARBY_WIFI_DEVICES"
         android:usesPermissionFlags="neverForLocation"
-        tools:targetApi="s" />
+         />
+    <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission
         android:name="android.permission.ACCESS_COARSE_LOCATION"
         android:maxSdkVersion="32" />
     <uses-permission
         android:name="android.permission.ACCESS_FINE_LOCATION"
         android:maxSdkVersion="32" />
-    <uses-permission 
+    <uses-permission
         android:name="android.permission.ACCESS_BACKGROUND_LOCATION"
         android:maxSdkVersion="32" />
     <uses-permission
@@ -33,7 +35,7 @@
     <uses-permission
         android:name="android.permission.BLUETOOTH_SCAN"
         android:usesPermissionFlags="neverForLocation"
-        tools:targetApi="s" />
+         />
     <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -49,6 +51,7 @@
         android:protectionLevel="signature" />
 
     <uses-permission android:name="${applicationId}.INTERNAL_BROADCASTS" />
+    <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
 
     <application
         android:name=".MyApplication"
@@ -59,18 +62,13 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.CatShare"
-        tools:targetApi="31">
-        <activity
-            android:name=".SettingsActivity"
-            android:exported="false"
-            android:label="@string/title_activity_settings"
-            android:theme="@style/Theme.CatShare" />
+        android:theme="@style/Theme.EasyShare"
+        >
         <activity
             android:name=".ShareActivity"
             android:exported="true"
-            android:label="@string/send"
-            android:theme="@style/Theme.CatShare">
+            android:excludeFromRecents="true"
+            android:theme="@style/Theme.EasyShare.ShareSheet">
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -85,14 +83,19 @@
         <activity
             android:name=".StartReceiverActivity"
             android:exported="false"
-            android:theme="@style/Theme.Transparent" />
+            android:theme="@style/Theme.EasyShare.Transparent" />
+        <activity
+            android:name=".IncomingTransferActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:theme="@style/Theme.EasyShare.ShareSheet" />
 
         <service
             android:name=".services.ReceiverTileService"
             android:enabled="true"
             android:exported="true"
-            android:icon="@drawable/ic_bluetooth_searching"
-            android:label="@string/noti_receiver_title"
+            android:icon="@drawable/ic_tile_alliance"
+            android:label="@string/receiver_tile_label"
             android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
             <meta-data
                 android:name="android.service.quicksettings.TOGGLEABLE_TILE"
@@ -121,7 +124,7 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:theme="@style/Theme.CatShare">
+            android:theme="@style/Theme.EasyShare">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
 

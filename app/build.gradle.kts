@@ -1,4 +1,5 @@
 
+import java.io.File
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -7,6 +8,22 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.kotlin.parcelize)
 }
+
+fun signingValue(name: String): String? =
+    providers.environmentVariable(name)
+        .orElse(providers.gradleProperty(name))
+        .orNull
+
+val signingKeystorePath = signingValue("SIGNING_KEYSTORE_PATH")
+val signingStorePassword = signingValue("SIGNING_STORE_PASSWORD")
+val signingKeyAlias = signingValue("SIGNING_KEY_ALIAS")
+val signingKeyPassword = signingValue("SIGNING_KEY_PASSWORD")
+val hasReleaseSigningCredentials =
+    !signingKeystorePath.isNullOrBlank() &&
+        !signingStorePassword.isNullOrBlank() &&
+        !signingKeyAlias.isNullOrBlank() &&
+        !signingKeyPassword.isNullOrBlank() &&
+        File(signingKeystorePath).isFile
 
 android {
     namespace = "me.pipi.easyshare"
@@ -20,8 +37,24 @@ android {
         versionName = "0.1"
     }
 
+    signingConfigs {
+        create("release") {
+            if (hasReleaseSigningCredentials) {
+                storeFile = file(signingKeystorePath!!)
+                storePassword = signingStorePassword
+                keyAlias = signingKeyAlias
+                keyPassword = signingKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
+            signingConfig = if (hasReleaseSigningCredentials) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
             isMinifyEnabled = true
             isShrinkResources = true
 

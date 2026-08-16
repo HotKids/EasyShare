@@ -172,13 +172,11 @@ jobs:
             exit 0
           fi
 
-          existing_tag="$(
+          if existing_tag="$(
             gh api \
               "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" \
-              --jq '[.object.type, .object.sha] | @tsv' 2>/dev/null || true
-          )"
-
-          if [[ -n "$existing_tag" ]]; then
+              --jq '[.object.type, .object.sha] | @tsv' 2>/dev/null
+          )"; then
             IFS=$'\t' read -r object_type object_sha <<< "$existing_tag"
             if [[ "$object_type" != "commit" || "$object_sha" != "$GITHUB_SHA" ]]; then
               echo "Tag $RELEASE_TAG already exists but does not point to this commit." >&2

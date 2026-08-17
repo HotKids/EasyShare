@@ -172,17 +172,24 @@ jobs:
             exit 0
           fi
 
+          tag_needs_creation=true
           if existing_tag="$(
             gh api \
               "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" \
               --jq '[.object.type, .object.sha] | @tsv' 2>/dev/null
           )"; then
             IFS=$'\t' read -r object_type object_sha <<< "$existing_tag"
-            if [[ "$object_type" != "commit" || "$object_sha" != "$GITHUB_SHA" ]]; then
-              echo "Tag $RELEASE_TAG already exists but does not point to this commit." >&2
-              exit 1
+            if [[ "$object_type" == "commit" && "$object_sha" == "$GITHUB_SHA" ]]; then
+              tag_needs_creation=false
+            else
+              echo "Replacing incomplete release tag: $RELEASE_TAG"
+              gh api \
+                --method DELETE \
+                "repos/$GITHUB_REPOSITORY/git/refs/tags/$RELEASE_TAG"
             fi
-          else
+          fi
+
+          if [[ "$tag_needs_creation" == "true" ]]; then
             gh api \
               --method POST \
               "repos/$GITHUB_REPOSITORY/git/refs" \
@@ -234,7 +241,8 @@ jobs:
 
           while IFS= read -r tag_ref; do
             tag_name="${tag_ref#refs/tags/}"
-            if [[ -n "$tag_name" && "$tag_name" != "$CURRENT_TAG" ]]; then
+            if [[ -n "$tag_name" && "$tag_name" =~ ^v[0-9] &&
+              "$tag_name" != "$CURRENT_TAG" ]]; then
               echo "Removing previous release tag: $tag_name"
               gh api \
                 --method DELETE \

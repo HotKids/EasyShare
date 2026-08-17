@@ -421,7 +421,11 @@ private fun OutgoingTransferSheet(
         secondaryActionLabel = null,
         onSecondaryAction = null,
         primaryActionLabel = stringResource(
-            if (inProgress) R.string.cancel else R.string.close,
+            when {
+                inProgress -> R.string.cancel
+                status == TransferUiStatus.SUCCESS || status == TransferUiStatus.PARTIAL -> R.string.done
+                else -> R.string.close
+            },
         ),
         onPrimaryAction = if (inProgress) onCancel else onDone,
     )

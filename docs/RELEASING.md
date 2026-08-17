@@ -40,9 +40,9 @@ Pull Request 使用 debug 回退签名执行完整 Release 构建，不读取签
 
 `main` 的 Workflow 会读取 `versionName`，自动创建对应的 `v<versionName>` 标签，使用正式签名构建 APK，并发布 GitHub Release。同一版本的 Release 已存在时会安全跳过，不会重复发布。手动运行 Workflow 只构建并上传 artifact，不会创建 Release。
 
-新 Release 创建成功后，Workflow 会自动删除此前的 GitHub Releases 及其 `v*` 发布标签，仓库只保留最新 Release 和当前版本标签。清理步骤不会在新 Release 创建失败时执行，也不会删除非 `v*` 标签。
+新 Release 创建成功后，Workflow 会自动删除此前的 GitHub Releases 及其 `v<数字>` 发布标签，仓库只保留最新 Release 和当前版本标签。清理步骤不会在新 Release 创建失败时执行，也不会删除其他用途的标签。
 
-`main` 的发布任务按顺序执行，避免连续合并时后一次运行中断前一次发布或清理过程。
+`main` 的发布任务不会取消正在运行的发布；如果短时间内连续推送多次，GitHub 可能用较新的等待任务替换较旧的等待任务，最终会以最新的 `main` 和 `versionName` 为准发布。
 
 ## 签名迁移提醒
 

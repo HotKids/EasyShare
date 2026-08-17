@@ -22,6 +22,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.StatFs
+import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.text.format.Formatter
 import android.util.Log
@@ -77,6 +78,7 @@ import me.pipi.easyshare.models.WebSocketMessage
 import me.pipi.easyshare.utils.DeviceUtils
 import me.pipi.easyshare.utils.BleUtils
 import me.pipi.easyshare.utils.ArchiveEntryNames
+import me.pipi.easyshare.utils.ArchiveReceiveRecovery
 import me.pipi.easyshare.utils.LiveStage
 import me.pipi.easyshare.utils.LiveUpdateCoordinator
 import me.pipi.easyshare.utils.IncomingTransferUiCoordinator
@@ -103,6 +105,7 @@ import java.security.SecureRandom
 import java.security.cert.X509Certificate
 import java.time.Duration
 import java.util.concurrent.TimeUnit
+import java.util.zip.ZipException
 import java.util.zip.ZipInputStream
 import javax.net.ssl.SSLContext
 import javax.net.SocketFactory
@@ -353,6 +356,10 @@ class P2pReceiverService : BaseP2pService() {
                 }
             } catch (e: CancellationException) {
                 Log.i(TAG, "Receiving coroutine stopped", e)
+                IncomingTransferUiCoordinator.fail(
+                    localTaskId,
+                    getString(R.string.noti_recv_interrupted),
+                )
             } catch (e: Throwable) {
                 if (isExpectedCompletedSessionClose(e)) {
                     Log.i(TAG, "Peer closed session after receive completed")
@@ -703,6 +710,10 @@ class P2pReceiverService : BaseP2pService() {
                             }
                             IncomingRequestDecision.TIMED_OUT,
                             null -> {
+                                IncomingTransferUiCoordinator.fail(
+                                    localTaskId,
+                                    getString(R.string.incoming_transfer_timeout),
+                                )
                                 wsSession.sendStatusIgnoreException(
                                     99,
                                     taskId,
@@ -894,6 +905,22 @@ class P2pReceiverService : BaseP2pService() {
         }
     }
 
+    private fun deleteReceivedFile(receivedFile: ReceivedFile) {
+        runCatching {
+            if (DocumentsContract.isDocumentUri(this, receivedFile.uri)) {
+                DocumentFile.fromSingleUri(this, receivedFile.uri)?.delete() == true
+            } else {
+                contentResolver.delete(receivedFile.uri, null, null) > 0
+            }
+        }.onSuccess { deleted ->
+            if (!deleted) {
+                Log.w(TAG, "Could not remove a received file during rollback")
+            }
+        }.onFailure { cleanupError ->
+            Log.w(TAG, "Failed to remove a received file during rollback", cleanupError)
+        }
+    }
+
     private fun saveArchive(
         zipStream: ZipInputStream,
         progress: ProgressCounter,
@@ -914,7 +941,15 @@ class P2pReceiverService : BaseP2pService() {
             val customDir = getCustomDownloadDir()
 
             while (true) {
-                val entry = zipStream.nextEntry ?: break
+                val entry = try {
+                    zipStream.nextEntry
+                } catch (error: ZipException) {
+                    throw ExceptionWithMessage(
+                        "Archive contains an invalid entry",
+                        error,
+                        R.string.error_receive_invalid_file_name,
+                    )
+                } ?: break
                 if (entry.isDirectory) {
                     zipStream.closeEntry()
                     continue
@@ -928,7 +963,11 @@ class P2pReceiverService : BaseP2pService() {
                 val safeName = try {
                     ArchiveEntryNames.safeFileName(entry.name)
                 } catch (error: IllegalArgumentException) {
-                    throw TransferLimitException("Archive contains an invalid file name")
+                    throw ExceptionWithMessage(
+                        "Archive contains an invalid file name",
+                        error,
+                        R.string.error_receive_invalid_file_name,
+                    )
                 }
                 if (BuildConfig.DEBUG) Log.d(TAG, "Receiving archive entry")
                 onFileStart(safeName)
@@ -1029,8 +1068,14 @@ class P2pReceiverService : BaseP2pService() {
             }
 
             progress.complete(processedSize)
-            if (receivedFiles.size != expectedFileCount) {
+            if (receivedFiles.isEmpty() && expectedFileCount > 0) {
                 throw EOFException(
+                    "Archive ended before the first of $expectedFileCount files",
+                )
+            }
+            if (receivedFiles.size != expectedFileCount) {
+                Log.w(
+                    TAG,
                     "Archive ended after ${receivedFiles.size} of $expectedFileCount files",
                 )
             }
@@ -1038,12 +1083,16 @@ class P2pReceiverService : BaseP2pService() {
 
             return receivedFiles
         } catch (error: Throwable) {
-            receivedFiles.forEach { receivedFile ->
-                runCatching { contentResolver.delete(receivedFile.uri, null, null) }
-                    .onFailure { cleanupError ->
-                        Log.w(TAG, "Failed to remove an incomplete transfer artifact", cleanupError)
-                    }
+            if (ArchiveReceiveRecovery.canKeepCompletedFiles(error, receivedFiles.size)) {
+                Log.w(
+                    TAG,
+                    "Transfer interrupted after ${receivedFiles.size} completed files; keeping them",
+                    error,
+                )
+                progress.complete(processedSize)
+                return receivedFiles.toList()
             }
+            receivedFiles.forEach(::deleteReceivedFile)
             throw error
         } finally {
             if (platformValidatorInstalled) {
@@ -1135,7 +1184,7 @@ class P2pReceiverService : BaseP2pService() {
 
     companion object {
         val TAG: String = P2pReceiverService::class.java.simpleName
-        private const val INCOMING_REQUEST_TIMEOUT_MS = 60_000L
+        private const val INCOMING_REQUEST_TIMEOUT_MS = 31_000L
         private const val EXPLICIT_P2P_NETWORK_API = 37
         private const val P2P_ROUTE_SETTLE_MS = 500L
         private const val STATUS_REASON_OK = TransferStatusProtocol.REASON_OK

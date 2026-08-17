@@ -37,6 +37,7 @@ import me.pipi.easyshare.AppSettings
 import me.pipi.easyshare.BleSecurity
 import me.pipi.easyshare.BuildConfig
 import me.pipi.easyshare.R
+import me.pipi.easyshare.SessionSecurity
 import me.pipi.easyshare.models.DeviceInfo
 import me.pipi.easyshare.models.P2pInfo
 import me.pipi.easyshare.utils.BleUtils
@@ -309,6 +310,14 @@ class GattServerService : Service() {
                 var p2pInfo: P2pInfo = JsonWithUnknownKeys.decodeFromString(
                     data.decodeToString(throwOnInvalidSequence = true),
                 )
+                if (!SessionSecurity.isPeerAllowed(
+                        AppSettings(this@GattServerService).secureReceiveOnly,
+                        p2pInfo.cryptoVersion,
+                    )
+                ) {
+                    Log.i(TAG, "Rejected peer without secure protocol support")
+                    return false
+                }
                 val ecKey = p2pInfo.key
                 if (ecKey != null) {
                     val cipher = BleSecurity.deriveSessionKey(ecKey, p2pInfo.cryptoVersion)
@@ -329,9 +338,7 @@ class GattServerService : Service() {
                 require(p2pInfo.psk.toByteArray().size in MIN_PSK_BYTES..MAX_PSK_BYTES)
                 require(p2pInfo.mac.toByteArray().size <= MAX_MAC_BYTES)
                 require(p2pInfo.port in 1..65535)
-                if (p2pInfo.cryptoVersion != null &&
-                    p2pInfo.cryptoVersion >= BleSecurity.MODERN_CRYPTO_VERSION
-                ) {
+                if (SessionSecurity.usesModernProtocol(p2pInfo.cryptoVersion)) {
                     require(p2pInfo.authToken?.length in 32..128)
                     require(p2pInfo.certificateSha256?.matches(Regex("[0-9a-f]{64}")) == true)
                 }

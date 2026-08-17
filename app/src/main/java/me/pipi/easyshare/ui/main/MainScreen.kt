@@ -58,6 +58,7 @@ fun MainScreen(
     onDeviceNameChanged: (String) -> Unit,
     onBrandChanged: (Int) -> Unit,
     onChooseReceivePath: () -> Unit,
+    onSecureReceiveOnlyChanged: (Boolean) -> Unit,
     onEnhancedModeChanged: (Boolean) -> Unit,
     onCaptureLogs: () -> Unit,
 ) {
@@ -132,6 +133,18 @@ fun MainScreen(
                                 checked = state.receiverEnabled,
                                 enabled = !state.busy,
                                 onCheckedChange = onReceiverChanged,
+                            )
+                        },
+                    )
+                    SettingDivider()
+                    NativeSettingItem(
+                        title = stringResource(R.string.secure_receive_title),
+                        summary = stringResource(R.string.secure_receive_summary),
+                        onClick = { onSecureReceiveOnlyChanged(!state.secureReceiveOnly) },
+                        trailing = {
+                            Switch(
+                                checked = state.secureReceiveOnly,
+                                onCheckedChange = onSecureReceiveOnlyChanged,
                             )
                         },
                     )

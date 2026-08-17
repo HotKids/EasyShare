@@ -26,6 +26,12 @@ class AppSettings(private val context: Context) {
             prefs.edit { putBoolean("enhancedModeEnabled", value) }
         }
 
+    var secureReceiveOnly: Boolean
+        get() = prefs.getBoolean("secureReceiveOnly", false)
+        set(value) {
+            prefs.edit { putBoolean("secureReceiveOnly", value) }
+        }
+
     var brandId: Int
         get() = prefs.getInt("brandId", -1)
         set(value) {

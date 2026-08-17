@@ -4,10 +4,12 @@
     <string name="discoverable_desc">Ready to receive files from nearby devices</string>
     <string name="receiver_switch_title">Receive files</string>
     <string name="receiver_tile_label">Easy Share Alliance</string>
-    <string name="receiver_switch_summary">Requires Wi-Fi and Bluetooth</string>
+    <string name="receiver_switch_summary">Wi-Fi and Bluetooth must be on</string>
+    <string name="secure_receive_title">Secure transfer</string>
+    <string name="secure_receive_summary">Only receive from devices that support the secure protocol</string>
     <string name="compatibility_summary">Easy Share Alliance support for fast transfers with compatible nearby devices</string>
     <string name="shizuku_authorization">Enhanced mode</string>
-    <string name="shizuku_desc">Use Shizuku to read this device’s MAC address</string>
+    <string name="shizuku_desc">Get this device’s MAC with Shizuku</string>
     <string name="shizuku_unavailable">Start Shizuku first</string>
 
     <string name="noti_connecting">Establishing connection…</string>

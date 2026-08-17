@@ -9,6 +9,12 @@ import java.util.Base64
 import javax.net.ssl.X509TrustManager
 
 object SessionSecurity {
+    fun usesModernProtocol(cryptoVersion: Int?): Boolean =
+        cryptoVersion != null && cryptoVersion >= BleSecurity.MODERN_CRYPTO_VERSION
+
+    fun isPeerAllowed(secureReceiveOnly: Boolean, cryptoVersion: Int?): Boolean =
+        !secureReceiveOnly || usesModernProtocol(cryptoVersion)
+
     fun generateToken(): String = Base64.getUrlEncoder().withoutPadding().encodeToString(
         ByteArray(32).also(SecureRandom()::nextBytes),
     )

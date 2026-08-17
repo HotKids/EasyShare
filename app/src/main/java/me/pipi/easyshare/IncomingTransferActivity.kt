@@ -7,6 +7,8 @@ import android.graphics.drawable.ColorDrawable
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
+import android.util.Log
 import android.text.format.Formatter
 import android.view.WindowManager
 import android.widget.Toast
@@ -21,6 +23,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -42,6 +45,7 @@ import me.pipi.easyshare.ui.transfer.fileTypeLabel
 import me.pipi.easyshare.utils.DeviceUtils
 import me.pipi.easyshare.utils.INTERNAL_BROADCAST_PERMISSION
 import me.pipi.easyshare.utils.IncomingTransferUiCoordinator
+import kotlinx.coroutines.delay
 import java.util.concurrent.atomic.AtomicBoolean
 
 class IncomingTransferActivity : ComponentActivity() {
@@ -49,6 +53,7 @@ class IncomingTransferActivity : ComponentActivity() {
     private val timeoutHandler = Handler(Looper.getMainLooper())
     private var remainingSeconds by mutableIntStateOf(REQUEST_TIMEOUT_SECONDS)
     private var taskId: Int = Int.MIN_VALUE
+    private var cancelEnabledAtMillis = Long.MIN_VALUE
 
     private val countdownRunnable = object : Runnable {
         override fun run() {
@@ -102,6 +107,15 @@ class IncomingTransferActivity : ComponentActivity() {
             EasyShareTheme {
                 val states by IncomingTransferUiCoordinator.states.collectAsState()
                 val state = states[taskId] ?: fallbackState
+                LaunchedEffect(state.status) {
+                    if (
+                        state.status == IncomingTransferUiStatus.SUCCESS ||
+                        state.status == IncomingTransferUiStatus.PARTIAL
+                    ) {
+                        delay(RECEIVE_RESULT_AUTO_CLOSE_MILLIS)
+                        finish()
+                    }
+                }
                 BackHandler { dismissForState(state) }
                 IncomingTransferScreen(
                     state = state,
@@ -139,13 +153,16 @@ class IncomingTransferActivity : ComponentActivity() {
 
     private fun accept() {
         if (!responded.compareAndSet(false, true)) return
+        Log.i(TAG, "Incoming transfer accepted")
         timeoutHandler.removeCallbacks(countdownRunnable)
+        cancelEnabledAtMillis = SystemClock.elapsedRealtime() + CANCEL_GUARD_MILLIS
         IncomingTransferUiCoordinator.markReceiving(taskId)
         sendResponse(true)
     }
 
     private fun rejectAndFinish() {
         if (responded.compareAndSet(false, true)) {
+            Log.i(TAG, "Incoming transfer rejected")
             timeoutHandler.removeCallbacks(countdownRunnable)
             sendResponse(false)
         }
@@ -154,6 +171,7 @@ class IncomingTransferActivity : ComponentActivity() {
 
     private fun timeoutAndFinish() {
         if (responded.compareAndSet(false, true)) {
+            Log.i(TAG, "Incoming transfer request timed out")
             timeoutHandler.removeCallbacks(countdownRunnable)
             sendResponse(accepted = false, timedOut = true)
             Toast.makeText(this, R.string.incoming_transfer_timeout, Toast.LENGTH_SHORT).show()
@@ -162,6 +180,11 @@ class IncomingTransferActivity : ComponentActivity() {
     }
 
     private fun cancelAndFinish() {
+        if (SystemClock.elapsedRealtime() < cancelEnabledAtMillis) {
+            Log.i(TAG, "Ignoring cancel tap immediately after accepting")
+            return
+        }
+        Log.i(TAG, "Incoming transfer canceled")
         timeoutHandler.removeCallbacks(countdownRunnable)
         P2pReceiverService.cancelTask(this, taskId)
         finish()
@@ -200,7 +223,10 @@ class IncomingTransferActivity : ComponentActivity() {
         private const val EXTRA_FILE_COUNT = "fileCount"
         private const val EXTRA_TOTAL_SIZE = "totalSize"
         private const val EXTRA_BRAND_ID = "brandId"
-        private const val REQUEST_TIMEOUT_SECONDS = 10
+        private const val REQUEST_TIMEOUT_SECONDS = 30
+        private const val CANCEL_GUARD_MILLIS = 1_500L
+        private const val RECEIVE_RESULT_AUTO_CLOSE_MILLIS = 10_000L
+        private const val TAG = "IncomingTransfer"
 
         fun createIntent(
             context: Context,
@@ -299,7 +325,11 @@ private fun IncomingTransferScreen(
     val supportingText = when (state.status) {
         IncomingTransferUiStatus.REQUESTED -> listOfNotNull(
             sizeLabel,
-            stringResource(R.string.incoming_receive_timeout_hint, remainingSeconds),
+            pluralStringResource(
+                R.plurals.incoming_receive_timeout_hint,
+                remainingSeconds,
+                remainingSeconds,
+            ),
         ).joinToString(" · ")
 
         IncomingTransferUiStatus.RECEIVING,

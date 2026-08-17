@@ -590,11 +590,12 @@ class P2pSenderService : BaseP2pService() {
                                     input.use { ist ->
                                         zo.putNextEntry(ZipEntry("$i/$safeName"))
 
-                                        val buffer = ByteArray(1024 * 1024 * 4)
+                                        val buffer = ByteArray(TRANSFER_BUFFER_BYTES)
                                         while (true) {
                                             val readLen = ist.read(buffer)
                                             if (readLen == -1) break
                                             if (readLen == 0) continue
+                                            transferActivityNanos.set(System.nanoTime())
                                             zo.write(buffer, 0, readLen)
                                             processedSize += readLen.toLong()
                                             transferActivityNanos.set(System.nanoTime())
@@ -782,7 +783,7 @@ class P2pSenderService : BaseP2pService() {
                     statusFuture.awaitWithTimeout(
                         Duration.ofSeconds(STATUS_CONFIRMATION_TIMEOUT_SECONDS),
                         "Waiting for receive confirmation",
-                        R.string.error_send_timeout_handshake,
+                        R.string.error_send_timeout_confirmation,
                     )
                 }
                 val status = select {
@@ -995,7 +996,8 @@ class P2pSenderService : BaseP2pService() {
         private const val P2P_CREATE_RETRY_DELAY_MS = 1_000L
         private const val P2P_GROUP_REMOVAL_SETTLE_MS = 1_000L
         private const val TRANSFER_STALL_POLL_MS = 1_000L
-        private const val TRANSFER_STALL_TIMEOUT_MS = 30_000L
+        private const val TRANSFER_STALL_TIMEOUT_MS = 120_000L
+        private const val TRANSFER_BUFFER_BYTES = 64 * 1024
         private const val STATUS_CONFIRMATION_TIMEOUT_SECONDS = 30L
         private const val MAX_WEBSOCKET_FRAME_BYTES = 3L * 1024 * 1024
 

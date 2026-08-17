@@ -76,6 +76,7 @@ class MainActivity : ComponentActivity() {
                     onDeviceNameChanged = viewModel::setDeviceName,
                     onBrandChanged = viewModel::setBrand,
                     onChooseReceivePath = { chooseReceivePath.launch(null) },
+                    onSecureReceiveOnlyChanged = viewModel::setSecureReceiveOnly,
                     onEnhancedModeChanged = viewModel::setEnhancedMode,
                     onCaptureLogs = ::captureAndShareLogs,
                 )

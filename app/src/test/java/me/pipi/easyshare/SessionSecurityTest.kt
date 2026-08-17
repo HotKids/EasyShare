@@ -11,6 +11,24 @@ import org.junit.Test
 
 class SessionSecurityTest {
     @Test
+    fun secureReceivePolicyRejectsLegacyPeersOnlyWhenEnabled() {
+        assertTrue(SessionSecurity.isPeerAllowed(false, null))
+        assertTrue(SessionSecurity.isPeerAllowed(false, 1))
+        assertTrue(
+            SessionSecurity.isPeerAllowed(false, BleSecurity.MODERN_CRYPTO_VERSION),
+        )
+
+        assertFalse(SessionSecurity.isPeerAllowed(true, null))
+        assertFalse(SessionSecurity.isPeerAllowed(true, 1))
+        assertTrue(
+            SessionSecurity.isPeerAllowed(true, BleSecurity.MODERN_CRYPTO_VERSION),
+        )
+        assertTrue(
+            SessionSecurity.isPeerAllowed(true, BleSecurity.MODERN_CRYPTO_VERSION + 1),
+        )
+    }
+
+    @Test
     fun tokensAreUniqueAndUrlSafe() {
         val first = SessionSecurity.generateToken()
         val second = SessionSecurity.generateToken()

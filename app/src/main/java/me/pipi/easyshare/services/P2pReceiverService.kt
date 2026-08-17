@@ -59,7 +59,6 @@ import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
 import me.pipi.easyshare.AppSettings
-import me.pipi.easyshare.BleSecurity
 import me.pipi.easyshare.BuildConfig
 import me.pipi.easyshare.IncomingTransferActivity
 import me.pipi.easyshare.MyApplication
@@ -334,6 +333,16 @@ class P2pReceiverService : BaseP2pService() {
             stopSelf(startId)
             return START_NOT_STICKY
         }
+        if (!SessionSecurity.isPeerAllowed(
+                AppSettings(this).secureReceiveOnly,
+                info.cryptoVersion,
+            )
+        ) {
+            Log.i(TAG, "Rejected peer without secure protocol support")
+            MyApplication.getInstance().clearBusy()
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
 
         val localTaskId = Random.nextInt()
         retainTransferNotification = false
@@ -510,8 +519,7 @@ class P2pReceiverService : BaseP2pService() {
         localTaskId: Int,
     ) = coroutineScope {
         updateStage(localTaskId, getString(R.string.device), LiveStage.PREPARING)
-        val secureSession = p2pInfo.cryptoVersion != null &&
-            p2pInfo.cryptoVersion >= BleSecurity.MODERN_CRYPTO_VERSION
+        val secureSession = SessionSecurity.usesModernProtocol(p2pInfo.cryptoVersion)
         if (secureSession) {
             require(!p2pInfo.authToken.isNullOrBlank())
             require(p2pInfo.certificateSha256?.matches(Regex("[0-9a-f]{64}")) == true)

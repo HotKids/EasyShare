@@ -32,6 +32,7 @@ data class MainUiState(
     val configuredBrandId: Int = -1,
     val effectiveBrandId: Int = 0,
     val receivePath: String? = null,
+    val secureReceiveOnly: Boolean = false,
     val shizukuAvailable: Boolean = false,
     val shizukuGranted: Boolean = false,
 )
@@ -48,6 +49,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             configuredBrandId = settings.brandId,
             effectiveBrandId = DeviceUtils.getLocalBrandId(),
             receivePath = settings.downloadUri,
+            secureReceiveOnly = settings.secureReceiveOnly,
         )
     )
     val state: StateFlow<MainUiState> = _state.asStateFlow()
@@ -133,6 +135,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setReceivePath(uri: Uri) {
         settings.downloadUri = uri.toString()
         _state.value = _state.value.copy(receivePath = uri.toString())
+    }
+
+    fun setSecureReceiveOnly(enabled: Boolean) {
+        settings.secureReceiveOnly = enabled
+        _state.value = _state.value.copy(secureReceiveOnly = enabled)
     }
 
     fun setEnhancedMode(enabled: Boolean) {

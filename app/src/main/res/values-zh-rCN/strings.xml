@@ -5,10 +5,12 @@
     <string name="discoverable_desc">已准备好接收附近设备发送的文件</string>
     <string name="receiver_switch_title">接收文件</string>
     <string name="receiver_tile_label">互传联盟</string>
-    <string name="receiver_switch_summary">需先开启 Wi-Fi 和蓝牙</string>
+    <string name="receiver_switch_summary">接收前需开启 Wi-Fi 和蓝牙</string>
+    <string name="secure_receive_title">安全互传</string>
+    <string name="secure_receive_summary">仅接收支持安全协议的设备</string>
     <string name="compatibility_summary">支持互传联盟，可与附近兼容设备快速互传文件</string>
     <string name="shizuku_authorization">增强模式</string>
-    <string name="shizuku_desc">通过 Shizuku 获取本机 MAC 地址</string>
+    <string name="shizuku_desc">使用 Shizuku 获取本机 MAC</string>
     <string name="shizuku_unavailable">请先启动 Shizuku</string>
 
     <string name="noti_connecting">正在建立连接…</string>

@@ -22,11 +22,13 @@ import androidx.core.app.NotificationManagerCompat
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.network.tls.certificates.buildKeyStore
+import io.ktor.server.application.ApplicationCall
 import io.ktor.server.application.install
 import io.ktor.server.application.serverConfig
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.engine.sslConnector
 import io.ktor.server.netty.Netty
+import io.ktor.server.plugins.origin
 import io.ktor.server.response.respondOutputStream
 import io.ktor.server.response.respondText
 import io.ktor.server.routing.get
@@ -86,6 +88,7 @@ import me.pipi.easyshare.utils.awaitWithTimeout
 import me.pipi.easyshare.utils.createGroupSuspend
 import me.pipi.easyshare.utils.registerInternalBroadcastReceiver
 import me.pipi.easyshare.utils.removeGroupSuspend
+import me.pipi.easyshare.utils.requestConnectionInfo
 import me.pipi.easyshare.utils.requestGroupInfo
 import me.pipi.easyshare.utils.withTimeoutReason
 import no.nordicsemi.android.kotlin.ble.client.main.callback.ClientBleGatt
@@ -98,8 +101,10 @@ import java.security.cert.X509Certificate
 import java.time.Duration
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
+import java.util.zip.Deflater
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import kotlin.random.Random
@@ -412,9 +417,25 @@ class P2pSenderService : BaseP2pService() {
         val websocketClaimed = AtomicBoolean(false)
         val downloadClaimed = AtomicBoolean(false)
         val transferActivityNanos = AtomicLong(System.nanoTime())
+        val p2pGroupReady = AtomicBoolean(false)
+        val p2pGroupOwnerAddress = AtomicReference<String?>(null)
 
         fun isAuthorized(candidate: String?): Boolean =
             SessionSecurity.isAuthorized(securePeerExpected.get(), sessionToken, candidate)
+
+        // The session server listens on every interface, so the phone's regular Wi-Fi network can
+        // reach it too. Only serve peers that connected through the Wi-Fi Direct group, i.e. whose
+        // connection landed on the group owner address. Before the group exists nothing can be
+        // legitimate; if the owner address cannot be resolved the historical behaviour is kept.
+        fun arrivedThroughP2pGroup(call: ApplicationCall): Boolean {
+            if (!p2pGroupReady.get()) return false
+            val expected = p2pGroupOwnerAddress.get() ?: return true
+            val accepted = SessionSecurity.isSameAddress(call.request.origin.localAddress, expected)
+            if (!accepted) {
+                Log.w(TAG, "Rejected a session request that did not arrive through the P2P group")
+            }
+            return accepted
+        }
 
         val keyAlias = "easyShareSession"
         val keyStorePassword = SessionSecurity.generateToken().take(32)
@@ -442,7 +463,8 @@ class P2pSenderService : BaseP2pService() {
 
                 routing {
                 webSocket("/websocket") {
-                    if (!isAuthorized(call.request.queryParameters["token"]) ||
+                    if (!arrivedThroughP2pGroup(call) ||
+                        !isAuthorized(call.request.queryParameters["token"]) ||
                         !websocketClaimed.compareAndSet(false, true)
                     ) {
                         close(CloseReason(CloseReason.Codes.VIOLATED_POLICY, "Unauthorized session"))
@@ -532,7 +554,8 @@ class P2pSenderService : BaseP2pService() {
                 }
 
                 get("/download") {
-                    if (call.request.queryParameters["taskId"] != taskIdStr ||
+                    if (!arrivedThroughP2pGroup(call) ||
+                        call.request.queryParameters["taskId"] != taskIdStr ||
                         !isAuthorized(call.request.queryParameters["token"]) ||
                         !downloadClaimed.compareAndSet(false, true)
                     ) {
@@ -569,6 +592,9 @@ class P2pSenderService : BaseP2pService() {
                         call.respondOutputStream(ContentType.Application.Zip, HttpStatusCode.OK) {
                             val cr = contentResolver
                             ZipOutputStream(this).use { zo ->
+                                // Shared media is usually compressed already; deflating it again
+                                // only burns CPU and caps the throughput of large transfers.
+                                zo.setLevel(Deflater.NO_COMPRESSION)
                                 if (sharedTextContent != null) {
                                     currentFileName = "sharedText.txt"
                                     val textBytes = sharedTextContent.toByteArray(Charsets.UTF_8)
@@ -669,6 +695,17 @@ class P2pSenderService : BaseP2pService() {
             try {
                 createP2pGroup(p2pConfig)
 
+                val connectionInfo = try {
+                    p2pManager.requestConnectionInfo(p2pChannel)
+                } catch (error: Throwable) {
+                    Log.w(TAG, "Failed to resolve the P2P group owner address", error)
+                    null
+                }
+                p2pGroupOwnerAddress.set(
+                    connectionInfo?.takeIf { it.groupFormed }?.groupOwnerAddress?.hostAddress,
+                )
+                p2pGroupReady.set(true)
+
                 val p2pMac = ShizukuUtils.getMacAddress(this@P2pSenderService, "p2p0") ?: "02:00:00:00:00:00"
                 if (BuildConfig.DEBUG) Log.d(TAG, "Resolved local P2P interface metadata")
 
@@ -697,8 +734,10 @@ class P2pSenderService : BaseP2pService() {
                             ?: throw IllegalStateException("BLE P2P info char not found")
                         val rdInfo: DeviceInfo =
                             JsonWithUnknownKeys.decodeFromString(deviceInfoChar.read().value.decodeToString())
-                        val securePeer = rdInfo.cryptoVersion != null &&
-                            rdInfo.cryptoVersion >= BleSecurity.MODERN_CRYPTO_VERSION
+                        // A peer only counts as secure when it also published a session key;
+                        // otherwise the credentials would go out in plain text under a modern label.
+                        val securePeer = SessionSecurity.usesModernProtocol(rdInfo.cryptoVersion) &&
+                            rdInfo.key != null
                         securePeerExpected.set(securePeer)
                         if (BuildConfig.DEBUG) {
                             Log.d(TAG, "Remote protocol metadata received; secure=$securePeer")
@@ -743,7 +782,7 @@ class P2pSenderService : BaseP2pService() {
 
                 val transferJob = async {
                     websocketConnectFuture.awaitWithTimeout(
-                        Duration.ofSeconds(10),
+                        Duration.ofSeconds(WEBSOCKET_CONNECT_TIMEOUT_SECONDS),
                         "Waiting for WS connect",
                         R.string.error_send_timeout_ws
                     )
@@ -756,7 +795,7 @@ class P2pSenderService : BaseP2pService() {
                         R.string.error_send_timeout_handshake
                     )
                     transferStartFuture.awaitWithTimeout(
-                        Duration.ofSeconds(30),
+                        Duration.ofSeconds(TRANSFER_START_TIMEOUT_SECONDS),
                         "Waiting for start transfer",
                         R.string.error_send_timeout_handshake
                     )
@@ -995,6 +1034,12 @@ class P2pSenderService : BaseP2pService() {
         private const val MAX_P2P_CREATE_ATTEMPTS = 10
         private const val P2P_CREATE_RETRY_DELAY_MS = 1_000L
         private const val P2P_GROUP_REMOVAL_SETTLE_MS = 1_000L
+        // The receiver may need up to 10 s to join the group, 5 s for the P2P network to come up
+        // and 3 s to connect; give it headroom instead of tearing the group down underneath it.
+        private const val WEBSOCKET_CONNECT_TIMEOUT_SECONDS = 20L
+        // The receiver shows a 30 s accept prompt backed by a 31 s service timeout, both starting
+        // only after sendRequest arrived, so the sender must wait strictly longer than that.
+        private const val TRANSFER_START_TIMEOUT_SECONDS = 45L
         private const val TRANSFER_STALL_POLL_MS = 1_000L
         private const val TRANSFER_STALL_TIMEOUT_MS = 120_000L
         private const val TRANSFER_BUFFER_BYTES = 64 * 1024

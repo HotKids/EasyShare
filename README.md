@@ -41,7 +41,7 @@ Release 构建会优先使用环境变量或用户级 Gradle 属性提供的正�
 ## 自动发布
 
 - 推送到 `main`：执行测试、Lint、Release 构建，并生成正式签名 APK artifact
-- 创建 `v*` 标签：在完成验证和签名后自动创建 GitHub Release
+- 合并 `versionName` 变更到 `main`：Workflow 会自动创建对应的 `v<versionName>` 标签并发布 GitHub Release，同一版本已存在时跳过。请勿手动创建 `v*` 标签，发布成功后旧的 `v*` 标签会被清理
 - 产物包含通用版和仅保留 `arm64-v8a` 的精简版 APK，并附带 SHA-256 校验文件
 
 详细流程见 [发布说明](docs/RELEASING.md)。

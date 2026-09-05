@@ -23,7 +23,7 @@ import java.net.NetworkInterface
 import kotlin.collections.iterator
 
 object ShizukuUtils {
-    private val binderLock = Object()
+    private val binderLock = Any()
     private var macService: IMacAddressService? = null
     private var serviceReady = CompletableDeferred<IMacAddressService>()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)

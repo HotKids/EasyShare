@@ -1,6 +1,7 @@
 package me.pipi.easyshare.services
 
 import android.annotation.SuppressLint
+import android.app.DownloadManager
 import android.app.Notification
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
@@ -31,7 +32,6 @@ import android.widget.Toast
 import androidx.annotation.DrawableRes
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
-import androidx.core.net.toUri
 import androidx.documentfile.provider.DocumentFile
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
@@ -39,6 +39,7 @@ import io.ktor.client.plugins.websocket.WebSockets
 import io.ktor.client.plugins.websocket.webSocketSession
 import io.ktor.client.request.prepareGet
 import io.ktor.client.statement.bodyAsChannel
+import io.ktor.http.isSuccess
 import io.ktor.utils.io.jvm.javaio.toInputStream
 import io.ktor.websocket.Frame
 import io.ktor.websocket.readText
@@ -83,6 +84,7 @@ import me.pipi.easyshare.utils.LiveUpdateCoordinator
 import me.pipi.easyshare.utils.IncomingTransferUiCoordinator
 import me.pipi.easyshare.utils.NotificationUtils
 import me.pipi.easyshare.utils.ProgressCounter
+import me.pipi.easyshare.utils.RemoteTransferOutcome
 import me.pipi.easyshare.utils.TAG
 import me.pipi.easyshare.utils.TransferLimitException
 import me.pipi.easyshare.utils.TransferLimits
@@ -361,6 +363,9 @@ class P2pReceiverService : BaseP2pService() {
                     )
                     showTransferResult(createFailedNotification(e))
                 } else {
+                    // Decided locally (notification action or sheet): drop the pending sheet
+                    // state so an open IncomingTransferActivity closes instead of waiting.
+                    IncomingTransferUiCoordinator.clear(localTaskId)
                     removeTransferNotification()
                 }
             } catch (e: CancellationException) {
@@ -479,12 +484,7 @@ class P2pReceiverService : BaseP2pService() {
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
         } else {
-            Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
-                putExtra(
-                    "android.provider.extra.INITIAL_URI",
-                    "content://downloads/public_downloads".toUri()
-                )
-            }
+            Intent(DownloadManager.ACTION_VIEW_DOWNLOADS)
         }
         builder.setContentIntent(
             PendingIntent.getActivity(
@@ -534,6 +534,9 @@ class P2pReceiverService : BaseP2pService() {
                     sslContext.init(null, arrayOf(tm), SecureRandom())
 
                     connectTimeout(3, TimeUnit.SECONDS)
+                    // The sender tolerates long stalls while it opens slow sources; OkHttp's
+                    // default 10 s read timeout would abort such downloads first.
+                    readTimeout(DOWNLOAD_READ_TIMEOUT_MS, TimeUnit.MILLISECONDS)
                     connectionPool(
                         ConnectionPool(5, 10, TimeUnit.SECONDS)
                     )
@@ -758,6 +761,13 @@ class P2pReceiverService : BaseP2pService() {
                     }
 
                     val files = client.prepareGet(downloadUrl).execute { downloadRes ->
+                        if (!downloadRes.status.isSuccess()) {
+                            throw ExceptionWithMessage(
+                                "Download rejected with ${downloadRes.status}",
+                                IllegalStateException("HTTP ${downloadRes.status.value}"),
+                                R.string.noti_recv_interrupted,
+                            )
+                        }
                         val ist = downloadRes.bodyAsChannel().toInputStream()
 
                         val progress = ProgressCounter(totalSize) { total, processed ->
@@ -869,14 +879,18 @@ class P2pReceiverService : BaseP2pService() {
                             false
                         }
                         statusFuture.onAwait { status ->
-                            if (status.first == 3 && status.second == "user refuse") {
-                                throw CancelledByUserException(true)
+                            when (TransferStatusProtocol.classify(status.first, status.second)) {
+                                RemoteTransferOutcome.REJECTED -> throw CancelledByUserException(true)
+                                RemoteTransferOutcome.SUCCESS,
+                                RemoteTransferOutcome.PARTIAL -> {
+                                    downloadJob.await()
+                                    false
+                                }
+                                RemoteTransferOutcome.TIMED_OUT,
+                                RemoteTransferOutcome.FAILED -> {
+                                    throw RuntimeException("Transfer terminated with $status")
+                                }
                             }
-                            if (status.first == 1) {
-                                downloadJob.await()
-                                return@onAwait false
-                            }
-                            throw RuntimeException("Transfer terminated with $status")
                         }
                     }
 
@@ -1193,6 +1207,8 @@ class P2pReceiverService : BaseP2pService() {
     companion object {
         val TAG: String = P2pReceiverService::class.java.simpleName
         private const val INCOMING_REQUEST_TIMEOUT_MS = 31_000L
+        // Keep in step with the sender's TRANSFER_STALL_TIMEOUT_MS.
+        private const val DOWNLOAD_READ_TIMEOUT_MS = 120_000L
         private const val EXPLICIT_P2P_NETWORK_API = 37
         private const val P2P_ROUTE_SETTLE_MS = 500L
         private const val STATUS_REASON_OK = TransferStatusProtocol.REASON_OK

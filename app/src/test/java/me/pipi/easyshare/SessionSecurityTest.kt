@@ -53,6 +53,17 @@ class SessionSecurityTest {
     }
 
     @Test
+    fun addressComparisonAcceptsOnlyEqualNumericLiterals() {
+        assertTrue(SessionSecurity.isSameAddress("192.168.49.1", "192.168.49.1"))
+        assertTrue(SessionSecurity.isSameAddress("::ffff:192.168.49.1", "192.168.49.1"))
+        assertFalse(SessionSecurity.isSameAddress("192.168.1.20", "192.168.49.1"))
+        assertFalse(SessionSecurity.isSameAddress("localhost", "127.0.0.1"))
+        assertFalse(SessionSecurity.isSameAddress(null, "192.168.49.1"))
+        assertFalse(SessionSecurity.isSameAddress("192.168.49.1", null))
+        assertFalse(SessionSecurity.isSameAddress("", ""))
+    }
+
+    @Test
     fun pinnedTrustManagerAcceptsOnlyExpectedCertificate() {
         val first = testCertificate("first")
         val second = testCertificate("second")

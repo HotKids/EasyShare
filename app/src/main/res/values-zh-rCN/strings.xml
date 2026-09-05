@@ -107,7 +107,7 @@
     <string name="auth_waiting">等待接收确认…</string>
 
     <string name="device_brand">设备品牌</string>
-    <string name="brand_auto">Auto</string>
+    <string name="brand_auto">自动</string>
     <string name="brand_android">Android</string>
     <string name="download_path">保存位置</string>
     <string name="choose_download_path">选择保存位置</string>

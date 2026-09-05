@@ -54,11 +54,12 @@ class IncomingTransferActivity : ComponentActivity() {
     private var remainingSeconds by mutableIntStateOf(REQUEST_TIMEOUT_SECONDS)
     private var taskId: Int = Int.MIN_VALUE
     private var cancelEnabledAtMillis = Long.MIN_VALUE
+    private var requestDeadlineMillis = Long.MIN_VALUE
 
     private val countdownRunnable = object : Runnable {
         override fun run() {
             if (responded.get()) return
-            remainingSeconds--
+            remainingSeconds = remainingRequestSeconds()
             if (remainingSeconds <= 0) {
                 timeoutAndFinish()
                 return
@@ -76,21 +77,23 @@ class IncomingTransferActivity : ComponentActivity() {
             return
         }
 
-        val fallbackState = IncomingTransferUiState(
-            taskId = taskId,
-            senderName = intent.getStringExtra(EXTRA_SENDER_NAME).orEmpty(),
-            fileName = intent.getStringExtra(EXTRA_FILE_NAME).orEmpty(),
-            fileCount = intent.getIntExtra(EXTRA_FILE_COUNT, 1).coerceAtLeast(1),
-            totalSize = intent.getLongExtra(EXTRA_TOTAL_SIZE, 0L).coerceAtLeast(0L),
-            brandId = intent.getIntExtra(EXTRA_BRAND_ID, -1).takeIf { it >= 0 },
-            status = IncomingTransferUiStatus.REQUESTED,
-        )
-        if (IncomingTransferUiCoordinator.get(taskId) == null) {
-            IncomingTransferUiCoordinator.publish(fallbackState)
+        // The receiver service publishes the request before launching this sheet. A missing
+        // entry means the request was already decided or superseded, so there is nothing to show.
+        val initialState = IncomingTransferUiCoordinator.get(taskId)
+        if (initialState == null) {
+            Log.i(TAG, "Incoming transfer request is no longer pending")
+            finish()
+            return
         }
 
-        val initialStatus = IncomingTransferUiCoordinator.get(taskId)?.status
-        if (initialStatus != IncomingTransferUiStatus.REQUESTED) {
+        // Keep the request deadline across configuration changes so a rotation does not restart
+        // the visible countdown while the service timeout keeps running.
+        requestDeadlineMillis = savedInstanceState
+            ?.getLong(STATE_REQUEST_DEADLINE, Long.MIN_VALUE)
+            ?.takeIf { it != Long.MIN_VALUE }
+            ?: (SystemClock.elapsedRealtime() + REQUEST_TIMEOUT_SECONDS * 1_000L)
+        remainingSeconds = remainingRequestSeconds()
+        if (initialState.status != IncomingTransferUiStatus.REQUESTED) {
             responded.set(true)
         }
 
@@ -106,27 +109,37 @@ class IncomingTransferActivity : ComponentActivity() {
         setContent {
             EasyShareTheme {
                 val states by IncomingTransferUiCoordinator.states.collectAsState()
-                val state = states[taskId] ?: fallbackState
-                LaunchedEffect(state.status) {
-                    if (
-                        state.status == IncomingTransferUiStatus.SUCCESS ||
-                        state.status == IncomingTransferUiStatus.PARTIAL
-                    ) {
-                        delay(RECEIVE_RESULT_AUTO_CLOSE_MILLIS)
-                        finish()
+                val state = states[taskId]
+                LaunchedEffect(state?.status) {
+                    when (state?.status) {
+                        // Cleared by the service: decided from the notification, cancelled, or
+                        // superseded by a newer request. Nothing is left to show.
+                        null -> finish()
+                        IncomingTransferUiStatus.REQUESTED -> Unit
+                        IncomingTransferUiStatus.SUCCESS,
+                        IncomingTransferUiStatus.PARTIAL -> {
+                            markDecidedElsewhere()
+                            delay(RECEIVE_RESULT_AUTO_CLOSE_MILLIS)
+                            finish()
+                        }
+                        // Accepted from the notification, failed, or cancelled by the peer: the
+                        // request countdown no longer applies to this sheet.
+                        else -> markDecidedElsewhere()
                     }
                 }
-                BackHandler { dismissForState(state) }
-                IncomingTransferScreen(
-                    state = state,
-                    remainingSeconds = remainingSeconds,
-                    onDismiss = { dismissForState(state) },
-                    onReject = ::rejectAndFinish,
-                    onAccept = ::accept,
-                    onCancel = ::cancelAndFinish,
-                    onClose = ::finish,
-                    onOpen = { openReceivedFiles(state.receivedFiles) },
-                )
+                if (state != null) {
+                    BackHandler { dismissForState(state) }
+                    IncomingTransferScreen(
+                        state = state,
+                        remainingSeconds = remainingSeconds,
+                        onDismiss = { dismissForState(state) },
+                        onReject = ::rejectAndFinish,
+                        onAccept = ::accept,
+                        onCancel = ::cancelAndFinish,
+                        onClose = ::finish,
+                        onOpen = { openReceivedFiles(state.receivedFiles) },
+                    )
+                }
             }
         }
 
@@ -141,6 +154,38 @@ class IncomingTransferActivity : ComponentActivity() {
             IncomingTransferUiCoordinator.clear(taskId)
         }
         super.onDestroy()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        val newTaskId = intent.getIntExtra(EXTRA_TASK_ID, Int.MIN_VALUE)
+        if (newTaskId == Int.MIN_VALUE || newTaskId == taskId) return
+        // A newer request reached this single-top instance while a previous result was still on
+        // screen. Hand it to a fresh instance instead of leaving a stale sheet behind.
+        Log.i(TAG, "Replacing the incoming transfer sheet with a newer request")
+        finish()
+        startActivity(
+            Intent(intent).apply {
+                flags = (flags or Intent.FLAG_ACTIVITY_NEW_TASK) and
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP.inv()
+            },
+        )
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putLong(STATE_REQUEST_DEADLINE, requestDeadlineMillis)
+    }
+
+    private fun remainingRequestSeconds(): Int {
+        val remainingMillis = requestDeadlineMillis - SystemClock.elapsedRealtime()
+        return ((remainingMillis + 999L) / 1_000L).toInt().coerceIn(0, REQUEST_TIMEOUT_SECONDS)
+    }
+
+    private fun markDecidedElsewhere() {
+        if (responded.compareAndSet(false, true)) {
+            timeoutHandler.removeCallbacks(countdownRunnable)
+        }
     }
 
     private fun dismissForState(state: IncomingTransferUiState) {
@@ -223,6 +268,7 @@ class IncomingTransferActivity : ComponentActivity() {
         private const val EXTRA_FILE_COUNT = "fileCount"
         private const val EXTRA_TOTAL_SIZE = "totalSize"
         private const val EXTRA_BRAND_ID = "brandId"
+        private const val STATE_REQUEST_DEADLINE = "requestDeadline"
         private const val REQUEST_TIMEOUT_SECONDS = 30
         private const val CANCEL_GUARD_MILLIS = 1_500L
         private const val RECEIVE_RESULT_AUTO_CLOSE_MILLIS = 10_000L

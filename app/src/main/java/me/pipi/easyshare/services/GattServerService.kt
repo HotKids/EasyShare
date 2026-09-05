@@ -24,6 +24,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
 import android.os.ParcelUuid
@@ -69,7 +70,7 @@ class GattServerService : Service() {
     @Volatile
     private var destroyed = false
 
-    private val localDeviceInfoLock = Object()
+    private val localDeviceInfoLock = Any()
     private var localDeviceInfo = DeviceInfo(
         0,
         BleSecurity.getEncodedPublicKey(),
@@ -319,6 +320,11 @@ class GattServerService : Service() {
                     return false
                 }
                 val ecKey = p2pInfo.key
+                if (SessionSecurity.usesModernProtocol(p2pInfo.cryptoVersion)) {
+                    // A modern peer must publish its session key; otherwise the credentials
+                    // would be accepted in plain text under a secure label.
+                    require(ecKey != null) { "Modern peer omitted its session key" }
+                }
                 if (ecKey != null) {
                     val cipher = BleSecurity.deriveSessionKey(ecKey, p2pInfo.cryptoVersion)
                     p2pInfo = P2pInfo(
@@ -336,6 +342,10 @@ class GattServerService : Service() {
                 }
                 require(p2pInfo.ssid.toByteArray().size in 1..MAX_SSID_BYTES)
                 require(p2pInfo.psk.toByteArray().size in MIN_PSK_BYTES..MAX_PSK_BYTES)
+                // Mirror WifiP2pConfig.Builder so junk is rejected here instead of after the
+                // receiver service has already started and marked the app busy.
+                require(P2P_NETWORK_NAME_PATTERN.matches(p2pInfo.ssid))
+                require(p2pInfo.psk.length in MIN_PSK_CHARS..MAX_PSK_CHARS)
                 require(p2pInfo.mac.toByteArray().size <= MAX_MAC_BYTES)
                 require(p2pInfo.port in 1..65535)
                 if (SessionSecurity.usesModernProtocol(p2pInfo.cryptoVersion)) {
@@ -436,13 +446,19 @@ class GattServerService : Service() {
         val advertiser = btAdvertiser ?: return
         val localBrandId = DeviceUtils.getLocalBrandId()
         val bleBrandId = if (localBrandId == 114514) 114 else localBrandId
+        // Byte 2 of the service data UUID advertises 5 GHz support; senders pick the group band
+        // from it. Fall back to the historical "supported" value if the query is unavailable.
+        val supports5Ghz = runCatching {
+            getSystemService(WifiManager::class.java)?.is5GHzBandSupported()
+        }.getOrNull() ?: true
 
         val advData = AdvertiseData.Builder().apply {
             addServiceUuid(ParcelUuid(BleUtils.ADV_SERVICE_UUID))
             addServiceData(
                 ParcelUuid.fromString(
                     String.format(
-                        "000001%02x-0000-1000-8000-00805f9b34fb",
+                        "0000%02x%02x-0000-1000-8000-00805f9b34fb",
+                        if (supports5Ghz) 1 else 0,
                         bleBrandId and 0xff,
                     )
                 ), Arrays.copyOfRange(BleUtils.RANDOM_DATA, 0, 6)
@@ -546,6 +562,9 @@ class GattServerService : Service() {
         private const val GATT_INVALID_OFFSET = 7
         private const val GATT_INVALID_ATTRIBUTE_LENGTH = 13
         private const val MAX_SSID_BYTES = 128
+        private val P2P_NETWORK_NAME_PATTERN = Regex("^DIRECT-[A-Za-z0-9]{2}.*")
+        private const val MIN_PSK_CHARS = 8
+        private const val MAX_PSK_CHARS = 63
         private const val MIN_PSK_BYTES = 8
         private const val MAX_PSK_BYTES = 128
         private const val MAX_MAC_BYTES = 64

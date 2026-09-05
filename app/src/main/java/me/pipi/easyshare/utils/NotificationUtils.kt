@@ -68,6 +68,10 @@ object NotificationUtils {
             .setOngoing(state.ongoing)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
 
+        if (state.progress >= 0) {
+            builder.setProgress(100, state.progress.coerceIn(0, 100), state.indeterminate)
+        }
+
         if (state.ongoing) {
             builder.setRequestPromotedOngoing(true)
             builder.setLocalOnly(true)

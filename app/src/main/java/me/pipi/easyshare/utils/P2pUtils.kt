@@ -9,6 +9,7 @@ import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.wifi.p2p.WifiP2pConfig
 import android.net.wifi.p2p.WifiP2pGroup
+import android.net.wifi.p2p.WifiP2pInfo
 import android.net.wifi.p2p.WifiP2pManager
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeoutOrNull
@@ -63,6 +64,15 @@ suspend fun WifiP2pManager.requestGroupInfo(channel: WifiP2pManager.Channel): Wi
         groupInfoFuture.complete(it)
     }
     return groupInfoFuture.await()
+}
+
+@SuppressLint("MissingPermission")
+suspend fun WifiP2pManager.requestConnectionInfo(channel: WifiP2pManager.Channel): WifiP2pInfo? {
+    val connectionInfoFuture = CompletableDeferred<WifiP2pInfo?>()
+    requestConnectionInfo(channel) {
+        connectionInfoFuture.complete(it)
+    }
+    return connectionInfoFuture.await()
 }
 
 class P2pFutureActionListener : WifiP2pManager.ActionListener {

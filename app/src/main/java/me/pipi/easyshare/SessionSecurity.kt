@@ -1,6 +1,7 @@
 package me.pipi.easyshare
 
 import android.annotation.SuppressLint
+import java.net.InetAddress
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.security.cert.CertificateException
@@ -35,6 +36,23 @@ object SessionSecurity {
         expectedToken: String,
         candidateToken: String?,
     ): Boolean = !secureSessionRequired || constantTimeEquals(expectedToken, candidateToken)
+
+    /**
+     * Compares two textual IP addresses. Only numeric literals are accepted so that no name
+     * resolution can happen on the calling thread; anything else counts as a mismatch.
+     */
+    fun isSameAddress(actual: String?, expected: String?): Boolean {
+        val left = parseNumericAddress(actual) ?: return false
+        val right = parseNumericAddress(expected) ?: return false
+        return left == right
+    }
+
+    private fun parseNumericAddress(value: String?): InetAddress? {
+        if (value.isNullOrBlank() || !NUMERIC_ADDRESS.matches(value)) return null
+        return runCatching { InetAddress.getByName(value) }.getOrNull()
+    }
+
+    private val NUMERIC_ADDRESS = Regex("[0-9A-Fa-f:.]+")
 
     private fun ByteArray.toHex(): String = joinToString("") {
         "%02x".format(it.toInt() and 0xff)

@@ -13,6 +13,7 @@ import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Bundle
 import android.os.ParcelUuid
+import android.os.Parcelable
 import android.provider.OpenableColumns
 import android.text.format.Formatter
 import android.util.Log
@@ -54,6 +55,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -71,6 +73,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.lifecycle.compose.LifecycleResumeEffect
+import kotlinx.parcelize.Parcelize
 import me.pipi.easyshare.models.DiscoveredDevice
 import me.pipi.easyshare.models.FileInfo
 import me.pipi.easyshare.models.TaskInfo
@@ -235,7 +238,8 @@ fun ShareActivityContent(
     val context = LocalContext.current
     val discoveredDevices = deviceScanner()
     val transferStates by TransferUiCoordinator.states.collectAsState()
-    var selectedTransfer by remember { mutableStateOf<SelectedTransfer?>(null) }
+    // Survives configuration changes so a rotation mid-send keeps showing the transfer sheet.
+    var selectedTransfer by rememberSaveable { mutableStateOf<SelectedTransfer?>(null) }
     val selectedState = selectedTransfer?.let { transfer ->
         transferStates[transfer.device.id]?.takeIf { it.taskId == transfer.taskId }
     }
@@ -342,10 +346,11 @@ fun ShareActivityContent(
     }
 }
 
+@Parcelize
 private data class SelectedTransfer(
     val device: DiscoveredDevice,
     val taskId: Int,
-)
+) : Parcelable
 
 @Composable
 private fun OutgoingTransferSheet(
@@ -587,7 +592,7 @@ fun deviceScanner(): List<DiscoveredDevice> {
     LifecycleResumeEffect(context) {
         val manager = context.getSystemService(BluetoothManager::class.java)
         val adapter = manager.adapter
-        val devicesLock = Object()
+        val devicesLock = Any()
 
         val callback = object : ScanCallback() {
             override fun onScanFailed(errorCode: Int) {

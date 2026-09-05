@@ -111,11 +111,20 @@ jobs:
           "$build_tools/apksigner" verify --verbose release/easy-share-arm64.apk
           (cd release && sha256sum easy-share-*.apk > SHA256SUMS)
 
+      - name: Resolve artifact name
+        if: github.event_name != 'pull_request'
+        id: artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Artifact names cannot contain "/", which manual runs on feature branches would hit.
+          printf 'name=easy-share-%s\n' "${GITHUB_REF_NAME//\//-}" >> "$GITHUB_OUTPUT"
+
       - name: Upload signed APKs
         if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: easy-share-${{ github.ref_name }}
+          name: ${{ steps.artifact.outputs.name }}
           path: |
             release/easy-share-universal.apk
             release/easy-share-arm64.apk

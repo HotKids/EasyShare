@@ -33,6 +33,7 @@ data class MainUiState(
     val effectiveBrandId: Int = 0,
     val receivePath: String? = null,
     val secureReceiveOnly: Boolean = false,
+    val secureSendOnly: Boolean = false,
     val shizukuAvailable: Boolean = false,
     val shizukuGranted: Boolean = false,
 )
@@ -48,8 +49,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             deviceName = settings.deviceName,
             configuredBrandId = settings.brandId,
             effectiveBrandId = DeviceUtils.getLocalBrandId(),
-            receivePath = settings.downloadUri,
+            receivePath = usableReceivePath(),
             secureReceiveOnly = settings.secureReceiveOnly,
+            secureSendOnly = settings.secureSendOnly,
         )
     )
     val state: StateFlow<MainUiState> = _state.asStateFlow()
@@ -62,7 +64,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         receiverEnabled = intent.getBooleanExtra("isRunning", false)
                     )
                 }
-                MyApplication.ACTION_BUSY_CHANGED -> {
+                ServiceState.ACTION_BUSY_CHANGED -> {
                     _state.value = _state.value.copy(
                         busy = intent.getBooleanExtra("busy", false)
                     )
@@ -102,7 +104,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             appStateReceiver,
             IntentFilter().apply {
                 addAction(ServiceState.ACTION_UPDATE_RECEIVER_STATE)
-                addAction(MyApplication.ACTION_BUSY_CHANGED)
+                addAction(ServiceState.ACTION_BUSY_CHANGED)
             },
         )
         Shizuku.addRequestPermissionResultListener(permissionListener)
@@ -140,6 +142,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setSecureReceiveOnly(enabled: Boolean) {
         settings.secureReceiveOnly = enabled
         _state.value = _state.value.copy(secureReceiveOnly = enabled)
+    }
+
+    fun setSecureSendOnly(enabled: Boolean) {
+        settings.secureSendOnly = enabled
+        _state.value = _state.value.copy(secureSendOnly = enabled)
+    }
+
+    /**
+     * The receiver silently falls back to the default folder when the persisted grant for a
+     * custom location is gone; drop the setting in that case so the UI does not show a path
+     * that will not be used.
+     */
+    private fun usableReceivePath(): String? {
+        val configured = settings.downloadUri ?: return null
+        val granted = context.contentResolver.persistedUriPermissions.any {
+            it.uri.toString() == configured && it.isWritePermission
+        }
+        if (!granted) {
+            Log.w(TAG, "Dropping the receive path because its access grant is gone")
+            settings.downloadUri = null
+            return null
+        }
+        return configured
     }
 
     fun setEnhancedMode(enabled: Boolean) {

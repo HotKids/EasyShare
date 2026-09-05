@@ -61,8 +61,6 @@ class MyApplication : Application() {
     fun hasVisibleActivity() = visibleActivityCount.get() > 0
 
     companion object {
-        const val ACTION_BUSY_CHANGED = "me.pipi.easyshare.BUSY_CHANGED"
-
         private var instance: MyApplication? = null
         fun getInstance() = instance!!
     }

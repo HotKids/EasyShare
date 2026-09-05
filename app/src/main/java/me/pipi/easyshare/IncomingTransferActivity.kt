@@ -309,7 +309,7 @@ private fun IncomingTransferScreen(
     val sizeLabel = state.totalSize.takeIf { it > 0L }?.let {
         Formatter.formatFileSize(context, it)
     }
-    val isText = state.fileName.isBlank()
+    val isText = state.isText
     val receivedCount = state.receivedFiles.size.takeIf { it > 0 } ?: state.fileCount
     val headline = when {
         isText -> stringResource(R.string.shared_text)

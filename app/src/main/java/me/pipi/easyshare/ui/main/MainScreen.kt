@@ -59,6 +59,7 @@ fun MainScreen(
     onBrandChanged: (Int) -> Unit,
     onChooseReceivePath: () -> Unit,
     onSecureReceiveOnlyChanged: (Boolean) -> Unit,
+    onSecureSendOnlyChanged: (Boolean) -> Unit,
     onEnhancedModeChanged: (Boolean) -> Unit,
     onCaptureLogs: () -> Unit,
 ) {
@@ -145,6 +146,18 @@ fun MainScreen(
                             Switch(
                                 checked = state.secureReceiveOnly,
                                 onCheckedChange = onSecureReceiveOnlyChanged,
+                            )
+                        },
+                    )
+                    SettingDivider()
+                    NativeSettingItem(
+                        title = stringResource(R.string.secure_send_title),
+                        summary = stringResource(R.string.secure_send_summary),
+                        onClick = { onSecureSendOnlyChanged(!state.secureSendOnly) },
+                        trailing = {
+                            Switch(
+                                checked = state.secureSendOnly,
+                                onCheckedChange = onSecureSendOnlyChanged,
                             )
                         },
                     )

@@ -91,7 +91,9 @@ jobs:
           zip -q -d "$signing_dir/arm64-unaligned.apk" \
             'lib/armeabi/*' 'lib/armeabi-v7a/*' 'lib/x86/*' 'lib/x86_64/*'
 
-          "$build_tools/zipalign" -f 4 \
+          # -P 16 keeps uncompressed native libraries on 16 KB page boundaries, which Android
+          # 15+ requires when they are loaded straight from the APK.
+          "$build_tools/zipalign" -P 16 -f 4 \
             "$signing_dir/arm64-unaligned.apk" "$signing_dir/arm64-aligned.apk"
 
           "$build_tools/apksigner" sign \
@@ -109,6 +111,8 @@ jobs:
 
           "$build_tools/apksigner" verify --verbose release/easy-share-universal.apk
           "$build_tools/apksigner" verify --verbose release/easy-share-arm64.apk
+          "$build_tools/zipalign" -c -P 16 4 release/easy-share-universal.apk
+          "$build_tools/zipalign" -c -P 16 4 release/easy-share-arm64.apk
           (cd release && sha256sum easy-share-*.apk > SHA256SUMS)
 
       - name: Resolve artifact name

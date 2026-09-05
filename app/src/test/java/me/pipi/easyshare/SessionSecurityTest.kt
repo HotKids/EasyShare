@@ -29,6 +29,18 @@ class SessionSecurityTest {
     }
 
     @Test
+    fun sessionMetadataProtectionStartsAtVersionThree() {
+        assertFalse(SessionSecurity.protectsSessionMetadata(null))
+        assertFalse(SessionSecurity.protectsSessionMetadata(BleSecurity.MODERN_CRYPTO_VERSION))
+        assertTrue(
+            SessionSecurity.protectsSessionMetadata(BleSecurity.PROTECTED_SESSION_CRYPTO_VERSION),
+        )
+        assertTrue(
+            SessionSecurity.usesModernProtocol(BleSecurity.PROTECTED_SESSION_CRYPTO_VERSION),
+        )
+    }
+
+    @Test
     fun tokensAreUniqueAndUrlSafe() {
         val first = SessionSecurity.generateToken()
         val second = SessionSecurity.generateToken()

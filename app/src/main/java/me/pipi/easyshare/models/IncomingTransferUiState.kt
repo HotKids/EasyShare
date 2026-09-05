@@ -17,6 +17,7 @@ data class IncomingTransferUiState(
     val fileCount: Int,
     val totalSize: Long,
     val status: IncomingTransferUiStatus,
+    val isText: Boolean = false,
     val progress: Int = 0,
     val receivedFiles: List<ReceivedFile> = emptyList(),
     val errorMessage: String? = null,

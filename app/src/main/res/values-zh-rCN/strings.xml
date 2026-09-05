@@ -1,13 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Easy Share</string>
-    <string name="send">发送</string>
     <string name="discoverable_desc">已准备好接收附近设备发送的文件</string>
     <string name="receiver_switch_title">接收文件</string>
     <string name="receiver_tile_label">互传联盟</string>
     <string name="receiver_switch_summary">接收前需开启 Wi-Fi 和蓝牙</string>
     <string name="secure_receive_title">安全互传</string>
     <string name="secure_receive_summary">仅接收支持安全协议的设备</string>
+    <string name="secure_send_title">仅发送给安全设备</string>
+    <string name="secure_send_summary">对方不支持安全协议时不发送</string>
     <string name="compatibility_summary">支持互传联盟，可与附近兼容设备快速互传文件</string>
     <string name="shizuku_authorization">增强模式</string>
     <string name="shizuku_desc">使用 Shizuku 获取本机 MAC</string>
@@ -18,7 +19,6 @@
         <item quantity="other">对方要发送 %1$d 个文件（%2$s）</item>
     </plurals>
     <string name="noti_request_desc_text">对方要发送一段文本</string>
-    <string name="preparing_transmission">正在准备传输…</string>
     <string name="preparing_send">正在准备发送…</string>
     <string name="preparing_receive">正在准备接收…</string>
     <string name="accept">接收</string>
@@ -64,6 +64,7 @@
     <string name="error_send_timeout_ws">连接对方设备超时</string>
     <string name="error_send_timeout_handshake">对方未及时响应</string>
     <string name="error_send_timeout_confirmation">文件已发送，但对方未确认接收</string>
+    <string name="error_send_insecure_peer">对方设备不支持安全协议</string>
     <string name="error_receive_invalid_file_name">文件名无效，已停止接收</string>
 
     <string name="incoming_transfer_from">来自 %1$s</string>
@@ -87,7 +88,6 @@
     <plurals name="incoming_receive_timeout_hint">
         <item quantity="other">%1$d 秒后自动拒绝</item>
     </plurals>
-    <string name="cancel_transfer">取消传输</string>
     <string name="close">关闭</string>
     <string name="open">打开</string>
     <string name="open_received_file_failed">无法打开文件，请前往保存位置查看</string>
@@ -95,14 +95,11 @@
     <string name="cancelled_by_user_local">传输已取消</string>
     <string name="cancelled_by_user_remote">对方取消了传输</string>
 
-    <string name="transferring_files">正在传输文件…</string>
     <string name="sending_files">正在发送文件…</string>
     <string name="receiving_files">正在接收文件…</string>
-    <string name="finishing">正在完成传输…</string>
     <string name="finishing_send">正在等待对方确认…</string>
     <string name="finishing_receive">正在保存文件…</string>
     <string name="done">完成</string>
-    <string name="done_partial">部分完成</string>
     <string name="response_waiting">等待对方确认接收…</string>
     <string name="auth_waiting">等待接收确认…</string>
 
@@ -110,7 +107,6 @@
     <string name="brand_auto">自动</string>
     <string name="brand_android">Android</string>
     <string name="download_path">保存位置</string>
-    <string name="choose_download_path">选择保存位置</string>
     <string name="default_path">/Download/Easy Share</string>
     <string name="save">保存</string>
     <string name="cancel">取消</string>

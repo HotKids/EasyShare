@@ -3,6 +3,7 @@ package me.pipi.easyshare.models
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -22,6 +23,15 @@ class ProtocolCompatibilityTest {
 
         assertTrue(payload.contains("\"catShare\":260811"))
         assertFalse(payload.contains("\"easyShare\""))
+    }
+
+    @Test
+    fun deviceInfoToleratesPeersWithoutSessionKey() {
+        val decoded = Json.decodeFromString<DeviceInfo>(
+            """{"state":0,"mac":"02:00:00:00:00:00"}"""
+        )
+        assertNull(decoded.key)
+        assertNull(decoded.cryptoVersion)
     }
 
     @Test

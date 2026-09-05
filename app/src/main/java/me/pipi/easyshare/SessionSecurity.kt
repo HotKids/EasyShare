@@ -13,6 +13,10 @@ object SessionSecurity {
     fun usesModernProtocol(cryptoVersion: Int?): Boolean =
         cryptoVersion != null && cryptoVersion >= BleSecurity.MODERN_CRYPTO_VERSION
 
+    /** Whether the session token and certificate fingerprint travel encrypted over BLE. */
+    fun protectsSessionMetadata(cryptoVersion: Int?): Boolean =
+        cryptoVersion != null && cryptoVersion >= BleSecurity.PROTECTED_SESSION_CRYPTO_VERSION
+
     fun isPeerAllowed(secureReceiveOnly: Boolean, cryptoVersion: Int?): Boolean =
         !secureReceiveOnly || usesModernProtocol(cryptoVersion)
 

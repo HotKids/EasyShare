@@ -98,7 +98,6 @@ import java.nio.ByteBuffer
 import kotlin.random.Random
 
 class ShareActivity : ComponentActivity() {
-    private lateinit var bluetoothManager: BluetoothManager
     private var shareInitialized = false
 
     private val permissionLauncher = registerForActivityResult(
@@ -132,8 +131,8 @@ class ShareActivity : ComponentActivity() {
         if (shareInitialized) return
         shareInitialized = true
 
-        bluetoothManager = getSystemService(BluetoothManager::class.java)
-        val adapter = bluetoothManager.adapter
+        // Both managers are null on hardware without the radio; show the hint instead of crashing.
+        val adapter = getSystemService(BluetoothManager::class.java)?.adapter
         if (adapter == null || !adapter.isEnabled) {
             NotificationUtils.showBluetoothToast(this)
             finish()
@@ -141,7 +140,7 @@ class ShareActivity : ComponentActivity() {
         }
 
         val wifiManager = getSystemService(WifiManager::class.java)
-        if (!wifiManager.isWifiEnabled) {
+        if (wifiManager == null || !wifiManager.isWifiEnabled) {
             NotificationUtils.showWifiToast(this)
             finish()
             return

@@ -22,6 +22,7 @@ import androidx.core.app.NotificationManagerCompat
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.network.tls.certificates.buildKeyStore
+import io.ktor.network.tls.extensions.HashAlgorithm
 import io.ktor.server.application.ApplicationCall
 import io.ktor.server.application.install
 import io.ktor.server.application.serverConfig
@@ -299,6 +300,8 @@ class P2pSenderService : BaseP2pService() {
     private val currentTaskLock = Any()
     private var currentJob: Job? = null
     private var currentTaskId: Int? = null
+    @Volatile
+    private var latestStartId = -1
 
     private lateinit var notificationManager: NotificationManagerCompat
     private var internalReceiverRegistered = false
@@ -413,6 +416,7 @@ class P2pSenderService : BaseP2pService() {
         val transferCompleteFuture = CompletableDeferred<Unit>()
         val wsCloseFuture = CompletableDeferred<Unit>()
         val sessionToken = SessionSecurity.generateToken()
+        val sessionKeyPair = BleSecurity.SessionKeyPair.generate()
         val securePeerExpected = AtomicBoolean(true)
         val websocketClaimed = AtomicBoolean(false)
         val downloadClaimed = AtomicBoolean(false)
@@ -444,6 +448,10 @@ class P2pSenderService : BaseP2pService() {
             certificate(keyAlias) {
                 password = privateKeyPassword
                 domains = listOf("127.0.0.1", "0.0.0.0", "localhost")
+                // Ktor defaults to SHA-1 over RSA-1024. Peers pin the fingerprint, but the
+                // handshake itself should not rest on a 1024-bit key.
+                keySizeInBits = 2048
+                hash = HashAlgorithm.SHA256
             }
         }
         val certificateSha256 = SessionSecurity.certificateSha256(
@@ -742,9 +750,25 @@ class P2pSenderService : BaseP2pService() {
                         if (BuildConfig.DEBUG) {
                             Log.d(TAG, "Remote protocol metadata received; secure=$securePeer")
                         }
+                        if (!securePeer && AppSettings(this@P2pSenderService).secureSendOnly) {
+                            throw ExceptionWithMessage(
+                                "Peer does not support the secure protocol",
+                                IllegalStateException("Insecure peer refused by settings"),
+                                R.string.error_send_insecure_peer,
+                            )
+                        }
 
                         val cipher = rdInfo.key?.let {
-                            BleSecurity.deriveSessionKey(it, rdInfo.cryptoVersion)
+                            sessionKeyPair.deriveSessionKey(it, rdInfo.cryptoVersion)
+                        }
+                        // Version 3 peers also expect the token and fingerprint encrypted;
+                        // version 2 peers still read them in the clear.
+                        val protectMetadata = securePeer &&
+                            SessionSecurity.protectsSessionMetadata(rdInfo.cryptoVersion)
+                        val sessionCryptoVersion = when {
+                            protectMetadata -> BleSecurity.PROTECTED_SESSION_CRYPTO_VERSION
+                            securePeer -> BleSecurity.MODERN_CRYPTO_VERSION
+                            else -> null
                         }
 
                         val newP2pInfo = P2pInfo(
@@ -752,16 +776,22 @@ class P2pSenderService : BaseP2pService() {
                             ssid = cipher?.encrypt("ssid", ssid) ?: ssid,
                             psk = cipher?.encrypt("psk", psk) ?: psk,
                             mac = cipher?.encrypt("mac", p2pMac) ?: p2pMac,
-                            key = if (cipher != null) {
-                                BleSecurity.getEncodedPublicKey()
-                            } else {
-                                null
-                            },
+                            key = if (cipher != null) sessionKeyPair.encodedPublicKey else null,
                             port = serverPort,
                             easyShare = BuildConfig.VERSION_CODE,
-                            cryptoVersion = BleSecurity.MODERN_CRYPTO_VERSION.takeIf { securePeer },
-                            authToken = sessionToken.takeIf { securePeer },
-                            certificateSha256 = certificateSha256.takeIf { securePeer },
+                            cryptoVersion = sessionCryptoVersion,
+                            authToken = when {
+                                protectMetadata && cipher != null ->
+                                    cipher.encrypt("token", sessionToken)
+                                securePeer -> sessionToken
+                                else -> null
+                            },
+                            certificateSha256 = when {
+                                protectMetadata && cipher != null ->
+                                    cipher.encrypt("cert", certificateSha256)
+                                securePeer -> certificateSha256
+                                else -> null
+                            },
                         )
 
                         val p2pInfoPayload = Json.encodeToString(newP2pInfo).toByteArray()
@@ -837,8 +867,10 @@ class P2pSenderService : BaseP2pService() {
                     }
                     RemoteTransferOutcome.SUCCESS,
                     RemoteTransferOutcome.PARTIAL -> {
-                        delay(1000)
+                        // Stop awaiting the transfer job first so a late flush error cannot turn
+                        // a confirmed receipt into a failure; the delay lets the peer wind down.
                         if (transferJob.isActive) transferJob.cancel()
+                        delay(1000)
                         return@coroutineScope status.first == TransferStatusProtocol.TYPE_SUCCESS &&
                             !status.second.equals(
                                 TransferStatusProtocol.REASON_PARTIAL,
@@ -873,7 +905,13 @@ class P2pSenderService : BaseP2pService() {
             return START_NOT_STICKY
         }
 
-        if (!MyApplication.getInstance().setBusy()) {
+        // Acquire the busy flag under the task lock: the finishing task releases it and stops
+        // the service under the same lock, so a start that slips in between is never killed.
+        val busyAcquired = synchronized(currentTaskLock) {
+            latestStartId = startId
+            MyApplication.getInstance().setBusy()
+        }
+        if (!busyAcquired) {
             Log.i(TAG, "Application is busy, skipping")
             NotificationUtils.showBusyToast(this)
             val hasActiveTask = synchronized(currentTaskLock) { currentJob?.isActive == true }
@@ -938,18 +976,20 @@ class P2pSenderService : BaseP2pService() {
                 }
             } finally {
                 LiveUpdateCoordinator.clearState("SENDER")
-                MyApplication.getInstance().clearBusy()
 
                 if (!retainTransferNotification) {
                     removeTransferNotification()
                 }
 
                 synchronized(currentTaskLock) {
-                    currentTaskId = null
-                    currentJob = null
-                    currentDeviceId = null
+                    MyApplication.getInstance().clearBusy()
+                    if (currentJob === coroutineContext[Job]) {
+                        currentTaskId = null
+                        currentJob = null
+                        currentDeviceId = null
+                        stopSelf(latestStartId)
+                    }
                 }
-                stopSelf()
             }
         }
 

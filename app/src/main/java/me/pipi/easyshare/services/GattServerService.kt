@@ -6,6 +6,7 @@ import android.app.ForegroundServiceStartNotAllowedException
 import android.app.Notification
 import android.app.PendingIntent
 import android.app.Service
+import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCharacteristic
@@ -50,6 +51,7 @@ import me.pipi.easyshare.utils.ShizukuUtils
 import me.pipi.easyshare.utils.TAG
 import me.pipi.easyshare.utils.checkBluetoothPermissions
 import me.pipi.easyshare.utils.checkNotificationPermission
+import me.pipi.easyshare.utils.getReceiverFlags
 import me.pipi.easyshare.utils.registerInternalBroadcastReceiver
 import java.util.Arrays
 import java.util.concurrent.ConcurrentHashMap
@@ -71,12 +73,13 @@ class GattServerService : Service() {
     private var destroyed = false
 
     private val localDeviceInfoLock = Any()
+    private var sessionKeyPair = BleSecurity.SessionKeyPair.generate()
     private var localDeviceInfo = DeviceInfo(
         0,
-        BleSecurity.getEncodedPublicKey(),
+        sessionKeyPair.encodedPublicKey,
         "02:00:00:00:00:00",
         BuildConfig.VERSION_CODE,
-        BleSecurity.MODERN_CRYPTO_VERSION,
+        BleSecurity.PROTECTED_SESSION_CRYPTO_VERSION,
     )
     private var localDeviceStatusBytes = Json.encodeToString(localDeviceInfo).toByteArray()
 
@@ -115,7 +118,11 @@ class GattServerService : Service() {
     }
 
     private var gattServer: BluetoothGattServer? = null
+    // Buffers for ATT prepared (long) writes, keyed by the writing central.
     private val pendingGattWrites = ConcurrentHashMap<BluetoothDevice, PendingGattWrite>()
+    // Reassembly buffers for framed Easy Share payloads, kept apart from the long-write buffers
+    // so a frame that itself arrives as a long write does not clobber the assembly in progress.
+    private val pendingChunkAssemblies = ConcurrentHashMap<BluetoothDevice, PendingGattWrite>()
 
     @SuppressLint("MissingPermission")
     private val gattServerCallback = object : BluetoothGattServerCallback() {
@@ -238,7 +245,9 @@ class GattServerService : Service() {
             } else if (pending == null || pending.length == 0 || pending.expectedLength != null) {
                 false
             } else {
-                handleP2pPayload(pending.bytes.copyOf(pending.length))
+                // A long write carries either one framed chunk (small MTU) or a whole legacy
+                // payload; handleP2pWrite tells the two apart.
+                handleP2pWrite(device, pending.bytes.copyOf(pending.length))
             }
             gattServer?.sendResponse(
                 device,
@@ -252,6 +261,7 @@ class GattServerService : Service() {
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
             if (newState != BluetoothProfile.STATE_CONNECTED) {
                 pendingGattWrites.remove(device)
+                pendingChunkAssemblies.remove(device)
             }
         }
 
@@ -259,13 +269,13 @@ class GattServerService : Service() {
             return try {
                 val chunk = BleUtils.parseP2pPayloadChunk(value)
                 if (chunk == null) {
-                    pendingGattWrites.remove(device)
+                    pendingChunkAssemblies.remove(device)
                     handleP2pPayload(value)
                 } else {
                     handleP2pPayloadChunk(device, chunk)
                 }
             } catch (error: IllegalArgumentException) {
-                pendingGattWrites.remove(device)
+                pendingChunkAssemblies.remove(device)
                 Log.w(TAG, "Rejected malformed chunked GATT metadata")
                 false
             }
@@ -276,24 +286,24 @@ class GattServerService : Service() {
             chunk: BleUtils.P2pPayloadChunk,
         ): Boolean {
             val now = SystemClock.elapsedRealtime()
-            val existing = pendingGattWrites[device]
+            val existing = pendingChunkAssemblies[device]
             val pending = if (chunk.offset == 0) {
-                if (existing == null && pendingGattWrites.size >= MAX_PENDING_GATT_DEVICES) {
+                if (existing == null && pendingChunkAssemblies.size >= MAX_PENDING_GATT_DEVICES) {
                     return false
                 }
                 PendingGattWrite(expectedLength = chunk.totalSize).also {
-                    pendingGattWrites[device] = it
+                    pendingChunkAssemblies[device] = it
                 }
             } else {
                 if (existing == null || now - existing.createdAtMs > GATT_WRITE_TIMEOUT_MS) {
-                    pendingGattWrites.remove(device)
+                    pendingChunkAssemblies.remove(device)
                     return false
                 }
                 existing
             }
 
             if (pending.expectedLength != chunk.totalSize || pending.length != chunk.offset) {
-                pendingGattWrites.remove(device)
+                pendingChunkAssemblies.remove(device)
                 return false
             }
 
@@ -301,7 +311,7 @@ class GattServerService : Service() {
             pending.length += chunk.payload.size
             if (pending.length < chunk.totalSize) return true
 
-            pendingGattWrites.remove(device)
+            pendingChunkAssemblies.remove(device)
             return handleP2pPayload(pending.bytes.copyOf(pending.length))
         }
 
@@ -326,7 +336,10 @@ class GattServerService : Service() {
                     require(ecKey != null) { "Modern peer omitted its session key" }
                 }
                 if (ecKey != null) {
-                    val cipher = BleSecurity.deriveSessionKey(ecKey, p2pInfo.cryptoVersion)
+                    val keyPair = synchronized(localDeviceInfoLock) { sessionKeyPair }
+                    val cipher = keyPair.deriveSessionKey(ecKey, p2pInfo.cryptoVersion)
+                    val protectedMetadata =
+                        SessionSecurity.protectsSessionMetadata(p2pInfo.cryptoVersion)
                     p2pInfo = P2pInfo(
                         id = BleUtils.getSenderId(),
                         ssid = cipher.decrypt("ssid", p2pInfo.ssid),
@@ -336,8 +349,12 @@ class GattServerService : Service() {
                         key = null,
                         easyShare = p2pInfo.easyShare,
                         cryptoVersion = p2pInfo.cryptoVersion,
-                        authToken = p2pInfo.authToken,
-                        certificateSha256 = p2pInfo.certificateSha256,
+                        authToken = p2pInfo.authToken?.let {
+                            if (protectedMetadata) cipher.decrypt("token", it) else it
+                        },
+                        certificateSha256 = p2pInfo.certificateSha256?.let {
+                            if (protectedMetadata) cipher.decrypt("cert", it) else it
+                        },
                     )
                 }
                 require(p2pInfo.ssid.toByteArray().size in 1..MAX_SSID_BYTES)
@@ -353,6 +370,8 @@ class GattServerService : Service() {
                     require(p2pInfo.certificateSha256?.matches(Regex("[0-9a-f]{64}")) == true)
                 }
                 startService(P2pReceiverService.getIntent(this@GattServerService, p2pInfo))
+                // The accepted request consumed this key pair; advertise a fresh one.
+                rotateSessionKey()
                 true
             } catch (error: Throwable) {
                 Log.w(TAG, "Rejected malformed GATT transfer metadata", error)
@@ -414,6 +433,12 @@ class GattServerService : Service() {
             addAction(ServiceState.ACTION_STOP_SERVICE)
         })
         internalReceiverRegistered = true
+        registerReceiver(
+            bluetoothStateReceiver,
+            IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED),
+            getReceiverFlags(),
+        )
+        bluetoothStateReceiverRegistered = true
         sendBroadcast(ServiceState.getUpdateIntent(true))
     }
 
@@ -521,6 +546,10 @@ class GattServerService : Service() {
             unregisterReceiver(internalReceiver)
             internalReceiverRegistered = false
         }
+        if (bluetoothStateReceiverRegistered) {
+            unregisterReceiver(bluetoothStateReceiver)
+            bluetoothStateReceiverRegistered = false
+        }
         sendBroadcast(ServiceState.getUpdateIntent(false))
 
         try {
@@ -538,6 +567,7 @@ class GattServerService : Service() {
         }
         gattServer = null
         pendingGattWrites.clear()
+        pendingChunkAssemblies.clear()
         super.onDestroy()
     }
 
@@ -549,11 +579,33 @@ class GattServerService : Service() {
                 mac = mac,
                 key = localDeviceInfo.key,
                 easyShare = BuildConfig.VERSION_CODE,
-                cryptoVersion = BleSecurity.MODERN_CRYPTO_VERSION,
+                cryptoVersion = BleSecurity.PROTECTED_SESSION_CRYPTO_VERSION,
             )
             localDeviceStatusBytes = Json.encodeToString(localDeviceInfo).toByteArray()
         }
     }
+
+    private fun rotateSessionKey() {
+        synchronized(localDeviceInfoLock) {
+            sessionKeyPair = BleSecurity.SessionKeyPair.generate()
+            localDeviceInfo = localDeviceInfo.copy(key = sessionKeyPair.encodedPublicKey)
+            localDeviceStatusBytes = Json.encodeToString(localDeviceInfo).toByteArray()
+        }
+    }
+
+    private val bluetoothStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action != BluetoothAdapter.ACTION_STATE_CHANGED) return
+            val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
+            if (state == BluetoothAdapter.STATE_TURNING_OFF || state == BluetoothAdapter.STATE_OFF) {
+                // Advertising and the GATT server die with the adapter; stop instead of showing
+                // an "active" receiver that nobody can reach.
+                Log.i(TAG, "Bluetooth is turning off; stopping the receiver")
+                stopSelf()
+            }
+        }
+    }
+    private var bluetoothStateReceiverRegistered = false
 
     companion object {
         private const val MAX_GATT_PAYLOAD_BYTES = BleUtils.MAX_P2P_GATT_PAYLOAD_BYTES

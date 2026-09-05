@@ -304,6 +304,8 @@ class P2pReceiverService : BaseP2pService() {
     private val currentTaskLock = Any()
     private var currentJob: Job? = null
     private var currentTaskId: Int? = null
+    @Volatile
+    private var latestStartId = -1
 
     override fun onBind(intent: Intent): IBinder? {
         return null
@@ -322,7 +324,13 @@ class P2pReceiverService : BaseP2pService() {
             return START_NOT_STICKY
         }
 
-        if (!MyApplication.getInstance().setBusy()) {
+        // Acquire the busy flag under the task lock: the finishing task releases it and stops
+        // the service under the same lock, so a start that slips in between is never killed.
+        val busyAcquired = synchronized(currentTaskLock) {
+            latestStartId = startId
+            MyApplication.getInstance().setBusy()
+        }
+        if (!busyAcquired) {
             Log.i(TAG, "Application is busy, skipping")
             NotificationUtils.showBusyToast(this)
             val hasActiveTask = synchronized(currentTaskLock) { currentJob?.isActive == true }
@@ -393,17 +401,19 @@ class P2pReceiverService : BaseP2pService() {
                 }
             } finally {
                 LiveUpdateCoordinator.clearState("RECEIVER")
-                MyApplication.getInstance().clearBusy()
 
                 if (!retainTransferNotification) {
                     removeTransferNotification()
                 }
-                
+
                 synchronized(currentTaskLock) {
-                    currentTaskId = null
-                    currentJob = null
+                    MyApplication.getInstance().clearBusy()
+                    if (currentJob === coroutineContext[Job]) {
+                        currentTaskId = null
+                        currentJob = null
+                        stopSelf(latestStartId)
+                    }
                 }
-                stopSelf()
             }
         }
 
@@ -661,6 +671,7 @@ class P2pReceiverService : BaseP2pService() {
                                 fileCount = fileCount,
                                 totalSize = totalSize,
                                 status = IncomingTransferUiStatus.REQUESTED,
+                                isText = textContent != null,
                             ),
                         )
                         val incomingIntent = IncomingTransferActivity.createIntent(

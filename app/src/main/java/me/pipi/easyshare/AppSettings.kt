@@ -32,6 +32,12 @@ class AppSettings(private val context: Context) {
             prefs.edit { putBoolean("secureReceiveOnly", value) }
         }
 
+    var secureSendOnly: Boolean
+        get() = prefs.getBoolean("secureSendOnly", false)
+        set(value) {
+            prefs.edit { putBoolean("secureSendOnly", value) }
+        }
+
     var brandId: Int
         get() = prefs.getInt("brandId", -1)
         set(value) {

@@ -1,12 +1,13 @@
 <resources>
     <string name="app_name">Easy Share</string>
-    <string name="send">Send</string>
     <string name="discoverable_desc">Ready to receive files from nearby devices</string>
     <string name="receiver_switch_title">Receive files</string>
     <string name="receiver_tile_label">Easy Share Alliance</string>
     <string name="receiver_switch_summary">Wi-Fi and Bluetooth must be on</string>
     <string name="secure_receive_title">Secure transfer</string>
     <string name="secure_receive_summary">Only receive from devices that support the secure protocol</string>
+    <string name="secure_send_title">Send only to secure devices</string>
+    <string name="secure_send_summary">Do not send to devices without the secure protocol</string>
     <string name="compatibility_summary">Easy Share Alliance support for fast transfers with compatible nearby devices</string>
     <string name="shizuku_authorization">Enhanced mode</string>
     <string name="shizuku_desc">Get this device’s MAC with Shizuku</string>
@@ -18,7 +19,6 @@
         <item quantity="other">The other device wants to send %1$d files (%2$s)</item>
     </plurals>
     <string name="noti_request_desc_text">The other device wants to send text</string>
-    <string name="preparing_transmission">Preparing transfer…</string>
     <string name="preparing_send">Preparing to send…</string>
     <string name="preparing_receive">Preparing to receive…</string>
     <string name="accept">Accept</string>
@@ -66,6 +66,7 @@
     <string name="error_send_timeout_ws">Connection to the other device timed out</string>
     <string name="error_send_timeout_handshake">The other device did not respond</string>
     <string name="error_send_timeout_confirmation">Sent, but the other device did not confirm receipt</string>
+    <string name="error_send_insecure_peer">The other device does not support the secure protocol</string>
     <string name="error_receive_invalid_file_name">Invalid file name. Receiving was stopped</string>
 
     <string name="incoming_transfer_from">From %1$s</string>
@@ -94,7 +95,6 @@
         <item quantity="one">Automatically decline in %1$d second</item>
         <item quantity="other">Automatically decline in %1$d seconds</item>
     </plurals>
-    <string name="cancel_transfer">Cancel transfer</string>
     <string name="close">Close</string>
     <string name="open">Open</string>
     <string name="open_received_file_failed">Could not open the file. Check the save location</string>
@@ -102,14 +102,11 @@
     <string name="cancelled_by_user_local">Transfer canceled</string>
     <string name="cancelled_by_user_remote">The other device canceled the transfer</string>
 
-    <string name="transferring_files">Transferring files…</string>
     <string name="sending_files">Sending files…</string>
     <string name="receiving_files">Receiving files…</string>
-    <string name="finishing">Completing transfer…</string>
     <string name="finishing_send">Waiting for receipt confirmation…</string>
     <string name="finishing_receive">Saving files…</string>
     <string name="done">Done</string>
-    <string name="done_partial">Partly complete</string>
     <string name="response_waiting">Waiting for the other device to accept…</string>
     <string name="auth_waiting">Waiting for receive confirmation…</string>
 
@@ -117,7 +114,6 @@
     <string name="brand_auto">Auto</string>
     <string name="brand_android">Android</string>
     <string name="download_path">Save to</string>
-    <string name="choose_download_path">Choose save location</string>
     <string name="default_path">/Download/Easy Share</string>
     <string name="save">Save</string>
     <string name="cancel">Cancel</string>

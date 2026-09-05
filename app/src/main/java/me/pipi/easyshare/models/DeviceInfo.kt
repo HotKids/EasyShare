@@ -6,7 +6,7 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class DeviceInfo(
     val state: Int,
-    val key: String?,
+    val key: String? = null,
     val mac: String,
     @SerialName("catShare")
     val easyShare: Int? = null,

@@ -2,6 +2,7 @@ package me.pipi.easyshare
 
 import java.security.KeyFactory
 import java.security.KeyPairGenerator
+import java.security.SecureRandom
 import java.security.interfaces.ECPrivateKey
 import java.security.interfaces.ECPublicKey
 import java.security.spec.X509EncodedKeySpec
@@ -12,43 +13,50 @@ import javax.crypto.Mac
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
-import java.security.SecureRandom
 
 object BleSecurity {
-    private val localPrivateKey: ECPrivateKey
-    private val localPublicKey: ECPublicKey
+    /**
+     * EC key pair for one BLE session. The receiver creates a fresh pair per service instance
+     * and after every accepted request, the sender one per outgoing task, so sessions never
+     * share key material and the advertised public key cannot be used to track a device.
+     */
+    class SessionKeyPair private constructor(
+        private val privateKey: ECPrivateKey,
+        publicKey: ECPublicKey,
+    ) {
+        val encodedPublicKey: String = Base64.getEncoder().encodeToString(publicKey.encoded)
 
-    init {
-        val kg = KeyPairGenerator.getInstance("EC")
-        kg.initialize(256)
-        val kp = kg.generateKeyPair()
-        localPublicKey = kp.public as ECPublicKey
-        localPrivateKey = kp.private as ECPrivateKey
-    }
+        fun deriveSessionKey(peerPublicKey: String, cryptoVersion: Int? = null): SessionCipher {
+            val kf = KeyFactory.getInstance("EC")
+            val otherPublicKey =
+                kf.generatePublic(X509EncodedKeySpec(Base64.getDecoder().decode(peerPublicKey)))
+            val agreement = KeyAgreement.getInstance("ECDH")
+            agreement.init(privateKey)
+            agreement.doPhase(otherPublicKey, true)
+            return if (cryptoVersion != null && cryptoVersion >= MODERN_CRYPTO_VERSION) {
+                val secret = agreement.generateSecret()
+                SessionCipher(
+                    key = SecretKeySpec(hkdfSha256(secret), "AES"),
+                    authenticated = true,
+                )
+            } else {
+                val secret = agreement.generateSecret("TlsPremasterSecret")
+                SessionCipher(SecretKeySpec(secret.encoded, "AES"), authenticated = false)
+            }
+        }
 
-    fun deriveSessionKey(publicKey: String, cryptoVersion: Int? = null): SessionCipher {
-        val kf = KeyFactory.getInstance("EC")
-        val otherPublicKey =
-            kf.generatePublic(X509EncodedKeySpec(Base64.getDecoder().decode(publicKey)))
-        val agreement = KeyAgreement.getInstance("ECDH")
-        agreement.init(localPrivateKey)
-        agreement.doPhase(otherPublicKey, true)
-        return if (cryptoVersion != null && cryptoVersion >= MODERN_CRYPTO_VERSION) {
-            val secret = agreement.generateSecret()
-            SessionCipher(
-                key = SecretKeySpec(hkdfSha256(secret), "AES"),
-                authenticated = true,
-            )
-        } else {
-            val secret = agreement.generateSecret("TlsPremasterSecret")
-            SessionCipher(SecretKeySpec(secret.encoded, "AES"), authenticated = false)
+        companion object {
+            fun generate(): SessionKeyPair {
+                val generator = KeyPairGenerator.getInstance("EC")
+                generator.initialize(256)
+                val keyPair = generator.generateKeyPair()
+                return SessionKeyPair(
+                    keyPair.private as ECPrivateKey,
+                    keyPair.public as ECPublicKey,
+                )
+            }
         }
     }
-
-    fun getEncodedPublicKey(): String {
-        return Base64.getEncoder().encodeToString(localPublicKey.encoded)
-    }
-
 
     private fun hkdfSha256(secret: ByteArray): ByteArray {
         val extract = Mac.getInstance("HmacSHA256")
@@ -100,7 +108,11 @@ object BleSecurity {
         }
     }
 
+    /** ECDH + HKDF + AES-GCM for the Wi-Fi Direct credentials. */
     const val MODERN_CRYPTO_VERSION = 2
+
+    /** Like [MODERN_CRYPTO_VERSION], but the session token and certificate fingerprint are encrypted too. */
+    const val PROTECTED_SESSION_CRYPTO_VERSION = 3
     private const val GCM_NONCE_BYTES = 12
     private const val GCM_TAG_BYTES = 16
     private val LEGACY_IV = "0102030405060708".toByteArray(Charsets.US_ASCII)

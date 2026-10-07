@@ -185,6 +185,10 @@ object NotificationUtils {
             .setOngoing(state.ongoing)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
 
+        if (channelId == SENDER_CHAN_ID || channelId == RECEIVER_CHAN_ID) {
+            setTransferCopy(context, builder, state.title, state.content)
+        }
+
         peerIconResource(state)?.let { builder.setLargeIcon(Icon.createWithResource(context, it)) }
 
         if (promotionPolicy.shouldPromote(state)) {
@@ -237,6 +241,19 @@ object NotificationUtils {
         }
 
         return builder.build()
+    }
+
+    fun setTransferCopy(
+        context: Context,
+        builder: NotificationCompat.Builder,
+        title: String,
+        content: String? = null,
+    ): NotificationCompat.Builder {
+        val body = if (content.isNullOrBlank()) title else "$title\n$content"
+        // System templates discard size spans; transfer details use the native body style.
+        return builder.setContentTitle(context.getString(R.string.app_name))
+            .setContentText(body)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
     }
 
     fun mainContentIntent(context: Context): PendingIntent = PendingIntent.getActivity(

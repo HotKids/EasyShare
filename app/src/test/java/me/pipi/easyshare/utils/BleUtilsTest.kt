@@ -44,6 +44,30 @@ class BleUtilsTest {
     }
 
     @Test
+    fun displayAdvertisementNameTrimsEdgesAndPreservesProtocolName() {
+        val cases = listOf(
+            Triple(" Phone ", "Phone", " Phone "),
+            Triple("\tPhone\r\n", "Phone", "\tPhone\r\n"),
+            Triple("\u3000像 素\u00a0", "像 素", "\u3000像 素\u00a0"),
+            Triple(" Pixel  Pro ", "Pixel  Pro", " Pixel  Pro "),
+            Triple(" Pixel \t", "Pixel…", " Pixel ..."),
+            Triple("像 素 \t", "像 素…", "像 素 ..."),
+            Triple(" Phone... ", "Phone...", " Phone... "),
+            Triple("\u3000 \t", null, null),
+        )
+        cases.forEach { (rawName, displayName, protocolName) ->
+            val data = ByteArray(27).apply {
+                rawName.toByteArray(Charsets.UTF_8).copyInto(this, destinationOffset = 10)
+            }
+            assertEquals("Display name for $rawName", displayName, BleUtils.deviceDisplayNameFromAdvertisement(data))
+            assertEquals("Protocol name for $rawName", protocolName, BleUtils.deviceNameFromAdvertisement(data))
+        }
+        assertNull(BleUtils.deviceDisplayNameFromAdvertisement(ByteArray(27)))
+        assertNull(BleUtils.deviceDisplayNameFromAdvertisement(ByteArray(26)))
+        assertNull(BleUtils.deviceDisplayNameFromAdvertisement(ByteArray(27).apply { this[10] = 0xc3.toByte() }))
+    }
+
+    @Test
     fun protocolDeviceNameIsBounded() {
         val normalized = BleUtils.normalizeDeviceName("手".repeat(100))
         assertTrue(normalized.toByteArray(Charsets.UTF_8).size <= BleUtils.MAX_DEVICE_NAME_BYTES)

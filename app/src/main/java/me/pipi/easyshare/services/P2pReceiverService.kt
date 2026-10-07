@@ -613,9 +613,10 @@ class P2pReceiverService : BaseP2pService() {
         val builder =
             createNotificationBuilder(R.drawable.ic_arrow_circle_down, contentIntent,
                 presentation?.brandId)
-                .setContentTitle(title)
+                .let {
+                    NotificationUtils.setTransferCopy(this, it, title, if (mainCopyOnly) null else content)
+                }
                 .setSubText(if (mainCopyOnly) null else senderName).setAutoCancel(true)
-                .setContentText(if (mainCopyOnly) null else content)
 
         presentation?.takeIf { it.isText }?.let {
             builder.setContentIntent(viewerPendingIntent(it, manualResult = true))
@@ -627,7 +628,7 @@ class P2pReceiverService : BaseP2pService() {
 
         if (!mainCopyOnly) builder.setStyle(
             if (receivedFiles.size == 1) {
-                NotificationCompat.BigTextStyle().bigText(receivedFiles.first().name)
+                NotificationCompat.BigTextStyle().bigText("$title\n$content\n${receivedFiles.first().name}")
             } else {
                 val inbox = NotificationCompat.InboxStyle().setSummaryText(content)
                 receivedFiles.take(5).forEach { inbox.addLine(it.name) }
@@ -677,9 +678,10 @@ class P2pReceiverService : BaseP2pService() {
             if (state.isText) viewerPendingIntent(state, manualResult = true) else contentIntent,
             state.brandId ?: peerBrandId,
         )
-            .setContentTitle(getString(me.pipi.easyshare.incomingTransferTitle(state.status, state.stage)))
-            .setContentText(content)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(content))
+            .let {
+                NotificationUtils.setTransferCopy(this, it,
+                    getString(me.pipi.easyshare.incomingTransferTitle(state.status, state.stage)), content)
+            }
             .setAutoCancel(true).build()
     }
 

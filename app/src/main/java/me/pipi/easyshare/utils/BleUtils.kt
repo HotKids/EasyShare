@@ -45,7 +45,8 @@ object BleUtils {
 
     fun deviceDisplayNameFromAdvertisement(data: ByteArray): String? {
         val decoded = decodedAdvertisementName(data) ?: return null
-        return if (decoded.endsWith('\t')) decoded.removeSuffix("\t") + "…" else decoded
+        val name = decoded.removeSuffix("\t").trim().takeIf { it.isNotEmpty() } ?: return null
+        return if (decoded.endsWith('\t')) name + "…" else name
     }
 
     private fun decodedAdvertisementName(data: ByteArray): String? {

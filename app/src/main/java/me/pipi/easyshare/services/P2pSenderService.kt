@@ -1077,12 +1077,12 @@ class P2pSenderService : BaseP2pService() {
                 R.string.device_status_timeout else R.string.noti_send_interrupted)
         }
         return createNotificationBuilder(task, R.drawable.ic_warning)
-            .setContentTitle(getString(me.pipi.easyshare.outgoingTransferTitle(
-                TransferUiState(task.id, task.device.id, outgoingFailureStatus(exception)),
-            )))
+            .let {
+                NotificationUtils.setTransferCopy(this, it, getString(me.pipi.easyshare.outgoingTransferTitle(
+                    TransferUiState(task.id, task.device.id, outgoingFailureStatus(exception)),
+                )), content)
+            }
             .setSubText(task.device.displayName)
-            .setContentText(content)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(content))
             .setAutoCancel(true)
             .build()
     }
@@ -1098,17 +1098,16 @@ class P2pSenderService : BaseP2pService() {
             else it
         }
         return createNotificationBuilder(task, R.drawable.ic_arrow_circle_up)
-            .setContentTitle(title)
-            .setSubText(if (mainCopyOnly) null else task.device.displayName)
-            .setContentText(
-                if (mainCopyOnly) null else getString(
+            .let {
+                NotificationUtils.setTransferCopy(this, it, title, if (mainCopyOnly) null else getString(
                     when {
                         partial -> R.string.noti_send_partial_body
                         textShared -> R.string.noti_send_text_complete_body
                         else -> R.string.noti_send_complete_body
                     },
-                ),
-            )
+                ))
+            }
+            .setSubText(if (mainCopyOnly) null else task.device.displayName)
             .setAutoCancel(true)
             .build()
     }

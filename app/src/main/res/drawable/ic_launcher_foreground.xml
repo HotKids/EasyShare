@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Center the unchanged source silhouette inside the adaptive-icon safe area. -->
+<!-- The lower lobes move the visual weight below the silhouette's bounding-box center. -->
 <inset xmlns:android="http://schemas.android.com/apk/res/android"
     android:insetLeft="15.307104%"
-    android:insetTop="16.526776%"
+    android:insetTop="13.995189%"
     android:insetRight="15.307104%"
-    android:insetBottom="14.087432%">
+    android:insetBottom="16.619019%">
     <bitmap
         android:src="@drawable/easy_share_icon_foreground"
         android:antialias="true"

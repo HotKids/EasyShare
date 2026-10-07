@@ -2,7 +2,7 @@ package me.pipi.easyshare.ui.main
 
 import android.graphics.ColorMatrixColorFilter
 import android.graphics.RenderEffect
-import android.net.Uri
+import androidx.core.net.toUri
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -37,7 +38,6 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -51,6 +51,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -58,6 +59,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.Color
@@ -69,9 +73,10 @@ import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.google.android.material.color.ColorRoles
 import com.google.android.material.color.MaterialColors
@@ -172,7 +177,6 @@ fun MainScreen(
                 title = stringResource(R.string.download_path),
                 summary = receivePath,
                 onClick = onChooseReceivePath,
-                summaryMaxLines = 2,
             )
             SettingDivider()
             NativeSettingItem(
@@ -189,14 +193,15 @@ fun MainScreen(
                 title = {
                     Text(
                         text = stringResource(R.string.app_name),
-                        style = MaterialTheme.typography.headlineSmall,
+                        style = MaterialTheme.typography.titleLarge,
+                        modifier = Modifier.semantics { heading() },
                     )
                 },
             )
         },
     ) { contentPadding ->
         BoxWithConstraints(
-            modifier = Modifier.fillMaxSize().padding(contentPadding),
+            modifier = Modifier.fillMaxSize().padding(contentPadding).consumeWindowInsets(contentPadding),
             contentAlignment = Alignment.TopCenter,
         ) {
             if (usesTwoPaneHome(maxWidth.value, maxHeight.value)) {
@@ -324,7 +329,7 @@ private fun LocalDeviceCard(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(
-                Modifier.size(60.dp).clickable(
+                Modifier.size(60.dp).clip(RoundedCornerShape(16.dp)).clickable(
                     role = Role.Button,
                     onClickLabel = stringResource(R.string.device_brand),
                     onClick = onBrandClick,
@@ -339,7 +344,7 @@ private fun LocalDeviceCard(
                 )
             }
             Column(
-                Modifier.weight(1f).heightIn(min = 60.dp).clickable(
+                Modifier.weight(1f).heightIn(min = 60.dp).clip(RoundedCornerShape(16.dp)).clickable(
                     role = Role.Button,
                     onClickLabel = stringResource(R.string.device_name),
                     onClick = onNameClick,
@@ -349,8 +354,6 @@ private fun LocalDeviceCard(
                 Text(
                     text = deviceName,
                     style = MaterialTheme.typography.titleMedium,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
                 )
                 Text(
                     text = statusText,
@@ -432,7 +435,7 @@ private fun SettingsCard(content: @Composable () -> Unit) {
 }
 
 private fun displayReceivePath(uriString: String): String {
-    val uri = Uri.parse(uriString)
+    val uri = uriString.toUri()
     val documentPath = uri.lastPathSegment ?: uri.path ?: uriString
     val relativePath = documentPath.substringAfter(':', documentPath).trim('/')
     return relativePath.takeIf { it.isNotBlank() }?.let { "/$it" } ?: uriString
@@ -445,7 +448,6 @@ private fun NativeSettingItem(
     onClick: () -> Unit,
     enabled: Boolean = true,
     checked: Boolean? = null,
-    summaryMaxLines: Int = Int.MAX_VALUE,
     trailing: (@Composable () -> Unit)? = null,
 ) {
     val interactionModifier = if (checked != null) {
@@ -456,7 +458,7 @@ private fun NativeSettingItem(
             onValueChange = { onClick() },
         )
     } else {
-        Modifier.clickable(enabled = enabled, onClick = onClick)
+        Modifier.clickable(enabled = enabled, role = Role.Button, onClick = onClick)
     }
     Row(
         modifier = Modifier
@@ -482,8 +484,6 @@ private fun NativeSettingItem(
                 color = MaterialTheme.colorScheme.onSurfaceVariant.let {
                     if (enabled) it else it.copy(alpha = 0.38f)
                 },
-                maxLines = summaryMaxLines,
-                overflow = TextOverflow.Ellipsis,
             )
         }
         if (trailing != null) {
@@ -500,6 +500,7 @@ private fun NativeSettingItem(
 @Composable
 private fun SettingDivider() {
     HorizontalDivider(
+        modifier = Modifier.padding(horizontal = 20.dp),
         color = MaterialTheme.colorScheme.outlineVariant,
     )
 }
@@ -518,40 +519,41 @@ private fun AllianceHero() {
             ColorMatrixColorFilter(heroAnimationColorMatrix(artworkColor, darkTheme)),
         ).asComposeRenderEffect()
     }
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(312.dp),
+    BoxWithConstraints(
+        modifier = Modifier.fillMaxWidth(),
         contentAlignment = Alignment.TopCenter,
     ) {
-        Row(
-            modifier = Modifier.padding(top = 85.dp),
-            horizontalArrangement = Arrangement.spacedBy(48.dp),
-        ) {
-            Image(
-                painter = painterResource(R.drawable.introduce_1),
-                contentDescription = null,
-                modifier = Modifier.size(width = 108.dp, height = 226.dp),
-                contentScale = ContentScale.Fit,
-                colorFilter = illustrationFilter,
-            )
-            Image(
-                painter = painterResource(R.drawable.introduce_2),
-                contentDescription = null,
-                modifier = Modifier.size(width = 108.dp, height = 226.dp),
-                contentScale = ContentScale.Fit,
-                colorFilter = illustrationFilter,
+        val artworkScale = (maxWidth / 264.dp).coerceIn(0f, 1f)
+        Box(Modifier.fillMaxWidth().height(312.dp * artworkScale), contentAlignment = Alignment.TopCenter) {
+            Row(
+                modifier = Modifier.padding(top = 85.dp * artworkScale),
+                horizontalArrangement = Arrangement.spacedBy(48.dp * artworkScale),
+            ) {
+                Image(
+                    painter = painterResource(R.drawable.introduce_1),
+                    contentDescription = null,
+                    modifier = Modifier.size(width = 108.dp * artworkScale, height = 226.dp * artworkScale),
+                    contentScale = ContentScale.Fit,
+                    colorFilter = illustrationFilter,
+                )
+                Image(
+                    painter = painterResource(R.drawable.introduce_2),
+                    contentDescription = null,
+                    modifier = Modifier.size(width = 108.dp * artworkScale, height = 226.dp * artworkScale),
+                    contentScale = ContentScale.Fit,
+                    colorFilter = illustrationFilter,
+                )
+            }
+            PagAnimation(
+                lightAsset = "pag/setting_bg.pag",
+                darkAsset = "pag/setting_bg_dark.pag",
+                modifier = Modifier
+                    .size(width = 184.dp * artworkScale, height = 72.dp * artworkScale)
+                    .graphicsLayer {
+                        renderEffect = artworkEffect
+                    },
             )
         }
-        PagAnimation(
-            lightAsset = "pag/setting_bg.pag",
-            darkAsset = "pag/setting_bg_dark.pag",
-            modifier = Modifier
-                .size(width = 184.dp, height = 72.dp)
-                .graphicsLayer {
-                    renderEffect = artworkEffect
-                },
-        )
     }
 }
 
@@ -588,6 +590,7 @@ private fun DeviceNameDialog(
     onSave: (String) -> Unit,
 ) {
     var name by rememberSaveable(currentName) { mutableStateOf(currentName) }
+    val focusRequester = remember { FocusRequester() }
     val deviceNameLabel = stringResource(R.string.device_name)
     HomeSettingsSheet(deviceNameLabel, onDismiss) {
         Column(
@@ -597,13 +600,14 @@ private fun DeviceNameDialog(
             OutlinedTextField(
                 value = name,
                 onValueChange = { name = it },
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().focusRequester(focusRequester),
                 label = { Text(deviceNameLabel) },
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                 keyboardActions = KeyboardActions(onDone = { onSave(name) }),
                 shape = RoundedCornerShape(16.dp),
             )
+            LaunchedEffect(Unit) { focusRequester.requestFocus() }
         }
         EasyShareSheetActions(
             secondaryActionLabel = stringResource(R.string.cancel),
@@ -657,7 +661,7 @@ private fun BrandSelectionDialog(
                     )
                     Text(
                         text = displayName,
-                        modifier = Modifier.padding(start = 12.dp),
+                        modifier = Modifier.weight(1f).padding(start = 12.dp),
                         style = MaterialTheme.typography.bodyLarge,
                     )
                 }
@@ -683,7 +687,7 @@ private fun HomeSettingsSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         shape = RoundedCornerShape(topStart = 32.dp, topEnd = 32.dp),
-        containerColor = MaterialTheme.colorScheme.surface,
+        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
         tonalElevation = 0.dp,
         dragHandle = null,
         // The shared container owns navigation and gesture insets.
@@ -693,7 +697,6 @@ private fun HomeSettingsSheet(
             title,
             centerTitle = true,
             heightFraction = 0.48f,
-            fitContent = true,
             providePaneSemantics = false,
             content = content,
         )

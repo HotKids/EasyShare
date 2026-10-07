@@ -51,7 +51,8 @@ data class MainUiState(
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
-    private val context = application.applicationContext
+    private val context: Application
+        get() = getApplication()
     private val settings = AppSettings(context)
     private var enableEnhancedModeAfterPermission = false
 
@@ -258,6 +259,5 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         Shizuku.removeRequestPermissionResultListener(permissionListener)
         Shizuku.removeBinderReceivedListener(binderReceivedListener)
         Shizuku.removeBinderDeadListener(binderDeadListener)
-        super.onCleared()
     }
 }

@@ -50,6 +50,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -82,6 +83,7 @@ import me.pipi.easyshare.models.IncomingTransferUiStatus
 import me.pipi.easyshare.models.P2pInfo
 import me.pipi.easyshare.models.ReceivedFile
 import me.pipi.easyshare.models.WebSocketMessage
+import me.pipi.easyshare.ui.transfer.TransferCopy
 import me.pipi.easyshare.utils.DeviceUtils
 import me.pipi.easyshare.utils.BleUtils
 import me.pipi.easyshare.utils.ArchiveEntryNames
@@ -128,6 +130,7 @@ class P2pReceiverService : BaseP2pService() {
     private var transferNotificationId = 0
     private var terminalNotificationStarted = false
     private var taskNotificationJob: Job? = null
+    private var lastNotificationStage: LiveStage? = null
 
     private suspend fun updateStage(
         taskId: Int,
@@ -135,7 +138,6 @@ class P2pReceiverService : BaseP2pService() {
         stage: LiveStage,
         progress: Int = 0,
         currentFile: String? = null,
-        contentOverride: String? = null,
         contentIntent: PendingIntent?,
         requestAccepted: Boolean = false,
         alertUser: Boolean = false,
@@ -155,18 +157,30 @@ class P2pReceiverService : BaseP2pService() {
             )
         } else null
 
-        val title = getString(stage.titleResource(sending = false))
-
+        val isText = presentation?.isText == true
+        val mainCopyOnly = stage.usesSingleLineFileCopy(isText)
         val attachmentSummary = presentation?.let {
-            if (it.isText) getString(R.string.shared_text) else {
-                resources.getQuantityString(R.plurals.incoming_transfer_multiple, it.fileCount, it.fileCount)
-            }
+            TransferCopy.itemLabel(this, it.fileName, it.mimeType, it.isText, it.fileCount)
         }.orEmpty()
-        val content = contentOverride ?: stage.notificationContent(
-            currentFile,
-            attachmentSummary,
-            getString(R.string.noti_receive_complete_body),
-        )
+        val title = when {
+            mainCopyOnly && presentation != null && (stage == LiveStage.REQUESTED || stage == LiveStage.WAITING_AUTH) ->
+                TransferCopy.request(this, senderName, attachmentSummary)
+            mainCopyOnly && presentation != null && stage == LiveStage.TRANSFERRING ->
+                TransferCopy.receiving(this, attachmentSummary)
+            else -> getString(stage.titleResource(sending = false))
+        }.let {
+            if (mainCopyOnly && presentation != null) TransferCopy.withSize(this, it, presentation.totalSize, isText)
+            else it
+        }
+        val content = when {
+            mainCopyOnly -> ""
+            isText && stage == LiveStage.WAITING_AUTH -> getString(R.string.noti_request_desc_text)
+            else -> stage.notificationContent(
+                currentFile,
+                attachmentSummary,
+                getString(R.string.noti_receive_complete_body),
+            )
+        }
 
         val unconfirmedProgress = progress.coerceIn(0, 99)
         val shortText = when (stage) {
@@ -181,10 +195,10 @@ class P2pReceiverService : BaseP2pService() {
         val state = LiveUpdateState(
             title = title,
             content = content,
-            subText = getString(R.string.incoming_transfer_from, senderName),
+            subText = if (mainCopyOnly) null else getString(R.string.incoming_transfer_from, senderName),
             peerBrandId = presentation?.brandId ?: peerBrandId,
             stage = stage,
-            isText = presentation?.isText == true,
+            isText = isText,
             progress = if (requestAccepted) stage.notificationProgress(unconfirmedProgress) else -1,
             indeterminate = stage.hasIndeterminateProgress(userInitiated = requestAccepted),
             shortCriticalText = shortText,
@@ -227,9 +241,21 @@ class P2pReceiverService : BaseP2pService() {
     }
 
     private fun updateForeground() {
+        val state = LiveUpdateCoordinator.state.value
+        val notification = NotificationUtils.buildNotificationFromState(this, state)
+        if (Build.VERSION.SDK_INT >= 37 && state.stage != null && state.stage != lastNotificationStage) {
+            lastNotificationStage = state.stage
+            // Keep promotion diagnostics free of peer names, file names, and task payloads.
+            Log.i("TransferNotification", "direction=receive id=$transferNotificationId stage=${state.stage}" +
+                " ongoing=${notification.flags and Notification.FLAG_ONGOING_EVENT != 0}" +
+                " requested=${notification.isRequestPromotedOngoing}" +
+                " eligible=${notification.hasPromotableCharacteristics()}" +
+                " allowed=${getSystemService(android.app.NotificationManager::class.java).canPostPromotedNotifications()}" +
+                " silent=${state.silent} largeIcon=${notification.getLargeIcon() != null}")
+        }
         startForeground(
             transferNotificationId,
-            NotificationUtils.getCurrentLiveNotification(this),
+            notification,
             ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
         )
     }
@@ -248,7 +274,7 @@ class P2pReceiverService : BaseP2pService() {
         )
     }
 
-    private suspend fun observeRequest(taskId: Int, requestSummary: String, contentIntent: PendingIntent?) {
+    private suspend fun observeRequest(taskId: Int, contentIntent: PendingIntent?) {
         taskNotificationJob?.cancel()
         taskNotificationJob = CoroutineScope(currentCoroutineContext()).launch(Dispatchers.Main.immediate) {
             var guardJob: Job? = null
@@ -256,7 +282,7 @@ class P2pReceiverService : BaseP2pService() {
                 when (state.status) {
                     IncomingTransferUiStatus.REQUESTED -> updateStage(
                         taskId, state.senderName, LiveStage.WAITING_AUTH,
-                        contentOverride = requestSummary, contentIntent = contentIntent,
+                        contentIntent = contentIntent,
                         alertUser = IncomingTransferUiCoordinator.takeRequestAlert(taskId),
                     )
                     IncomingTransferUiStatus.RECEIVING -> updateStage(
@@ -387,6 +413,7 @@ class P2pReceiverService : BaseP2pService() {
 
     @SuppressLint("MissingPermission")
     @Suppress("DEPRECATION")
+    @OptIn(DelicateCoroutinesApi::class)
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent == null) {
             stopSelf(startId)
@@ -429,6 +456,7 @@ class P2pReceiverService : BaseP2pService() {
         transferNotificationId = 0
         terminalNotificationStarted = false
         val peerAddress = intent.getStringExtra(IncomingPeerIdentity.EXTRA_GATT_PEER_ADDRESS)
+        // An admitted task must enter its cleanup even if canceled before IO dispatch.
         val job = scope.launch(Dispatchers.IO, start = CoroutineStart.ATOMIC) {
             var directoryContentIntent: PendingIntent? = null
             var peerBrandId: Int? = null
@@ -546,7 +574,11 @@ class P2pReceiverService : BaseP2pService() {
         return NotificationCompat.Builder(this, NotificationUtils.RECEIVER_CHAN_ID)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .setSmallIcon(icon)
-            .setLargeIcon(Icon.createWithResource(this, DeviceUtils.deviceIconById(peerBrandId)))
+            .apply {
+                DeviceUtils.knownDeviceIconById(peerBrandId)?.let {
+                    setLargeIcon(Icon.createWithResource(this@P2pReceiverService, it))
+                }
+            }
             .setContentIntent(contentIntent)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setOnlyAlertOnce(true)
@@ -559,6 +591,14 @@ class P2pReceiverService : BaseP2pService() {
         taskId: Int, senderName: String, receivedFiles: List<ReceivedFile>, isPartial: Boolean,
         contentIntent: PendingIntent?,
     ): Notification {
+        val presentation = IncomingTransferUiCoordinator.get(taskId)
+        val mainCopyOnly = !isPartial && receivedFiles.isNotEmpty() && presentation?.isText != true
+        val title = if (mainCopyOnly) {
+            val item = TransferCopy.itemLabel(this, receivedFiles.first().name,
+                receivedFiles.map { it.mimeType }.distinct().singleOrNull(), isText = false, count = receivedFiles.size)
+            TransferCopy.withSize(this, TransferCopy.received(this, senderName, item),
+                presentation?.totalSize ?: 0L, isText = false)
+        } else getString(if (isPartial) R.string.recv_partial else R.string.recv_ok)
         val content = if (receivedFiles.isEmpty()) {
             getString(R.string.msg_copied_to_clipboard)
         } else if (isPartial) {
@@ -572,11 +612,12 @@ class P2pReceiverService : BaseP2pService() {
         }
         val builder =
             createNotificationBuilder(R.drawable.ic_arrow_circle_down, contentIntent,
-                IncomingTransferUiCoordinator.get(taskId)?.brandId)
-                .setContentTitle(getString(if (isPartial) R.string.recv_partial else R.string.recv_ok))
-                .setSubText(senderName).setAutoCancel(true).setContentText(content)
+                presentation?.brandId)
+                .setContentTitle(title)
+                .setSubText(if (mainCopyOnly) null else senderName).setAutoCancel(true)
+                .setContentText(if (mainCopyOnly) null else content)
 
-        IncomingTransferUiCoordinator.get(taskId)?.takeIf { it.isText }?.let {
+        presentation?.takeIf { it.isText }?.let {
             builder.setContentIntent(viewerPendingIntent(it, manualResult = true))
         }
 
@@ -584,7 +625,7 @@ class P2pReceiverService : BaseP2pService() {
             return builder.build()
         }
 
-        builder.setStyle(
+        if (!mainCopyOnly) builder.setStyle(
             if (receivedFiles.size == 1) {
                 NotificationCompat.BigTextStyle().bigText(receivedFiles.first().name)
             } else {
@@ -805,17 +846,7 @@ class P2pReceiverService : BaseP2pService() {
                             context = this@P2pReceiverService,
                             state = requestState,
                         )
-                        val requestSummary = if (textContent != null) {
-                            getString(R.string.noti_request_desc_text)
-                        } else {
-                            resources.getQuantityString(
-                                R.plurals.noti_request_desc,
-                                fileCount,
-                                fileCount,
-                                Formatter.formatFileSize(this@P2pReceiverService, totalSize),
-                            )
-                        }
-                        observeRequest(localTaskId, requestSummary, contentIntent)
+                        observeRequest(localTaskId, contentIntent)
 
                         withContext(Dispatchers.Main) {
                             if (MyApplication.getInstance().hasVisibleActivity()) {

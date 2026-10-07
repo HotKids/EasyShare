@@ -1,7 +1,6 @@
 package me.pipi.easyshare.ui.transfer
 
 import me.pipi.easyshare.R
-import me.pipi.easyshare.attachmentDisplayName
 import me.pipi.easyshare.incomingCancelGuardRemainingMillis
 import me.pipi.easyshare.incomingTransferTitle
 import me.pipi.easyshare.models.IncomingTransferUiState
@@ -21,12 +20,6 @@ import org.junit.Test
 
 class TransferPresentationTest {
     @Test
-    fun unnamedFileLabelDoesNotReplaceARealFileWithTheSameName() {
-        assertEquals("未命名文件", attachmentDisplayName("shared_file", true, "未命名文件"))
-        assertEquals("shared_file", attachmentDisplayName("shared_file", false, "未命名文件"))
-        assertEquals("photo.jpg", attachmentDisplayName("photo.jpg", false, "未命名文件"))
-    }
-    @Test
     fun receiveCancelGuardUsesTheRestoredAbsoluteExpiryWithoutRestarting() {
         val restoredExpiry = 11_500L
         assertEquals(1_500L, incomingCancelGuardRemainingMillis(restoredExpiry, 10_000L))
@@ -45,9 +38,9 @@ class TransferPresentationTest {
     @Test
     fun sendProgressIsOnlyShownDuringTheAcceptedDownload() {
         val state = TransferUiState(1, "peer", TransferUiStatus.WAITING)
-        assertEquals(R.string.preparing_send, outgoingTransferTitle(state))
-        assertEquals(TransferVisualState.CONNECTING, outgoingTransferVisual(state))
-        assertEquals(R.string.response_waiting, outgoingTransferTitle(state.copy(stage = LiveStage.WAITING_AUTH)))
+        assertEquals(R.string.noti_connecting, outgoingTransferTitle(state))
+        assertEquals(TransferVisualState.FILE, outgoingTransferVisual(state))
+        assertEquals(R.string.noti_connecting, outgoingTransferTitle(state.copy(stage = LiveStage.WAITING_AUTH)))
         assertEquals(TransferVisualState.FILE, outgoingTransferVisual(state.copy(stage = LiveStage.WAITING_AUTH)))
         assertEquals(TransferVisualState.PROGRESS, outgoingTransferVisual(state.copy(status = TransferUiStatus.SENDING, stage = LiveStage.TRANSFERRING)))
         val confirming = state.copy(status = TransferUiStatus.SENDING, stage = LiveStage.FINALIZING)
@@ -66,13 +59,13 @@ class TransferPresentationTest {
     }
 
     @Test
-    fun sendPreparationConnectionAndConsentUseTheirOwnTitles() {
+    fun outgoingConnectionCopyDoesNotChangeSavingOrTerminalStates() {
         val waiting = TransferUiState(1, "peer", TransferUiStatus.WAITING)
-        assertEquals(R.string.preparing_send, outgoingTransferTitle(waiting.copy(stage = LiveStage.INIT)))
-        assertEquals(R.string.preparing_send, outgoingTransferTitle(waiting.copy(stage = LiveStage.PREPARING)))
+        assertEquals(R.string.noti_connecting, outgoingTransferTitle(waiting.copy(stage = LiveStage.INIT)))
+        assertEquals(R.string.noti_connecting, outgoingTransferTitle(waiting.copy(stage = LiveStage.PREPARING)))
         assertEquals(R.string.noti_connecting, outgoingTransferTitle(waiting.copy(stage = LiveStage.HANDSHAKE)))
-        assertEquals(R.string.response_waiting, outgoingTransferTitle(waiting.copy(stage = LiveStage.REQUESTED)))
-        assertEquals(R.string.response_waiting, outgoingTransferTitle(waiting.copy(stage = LiveStage.WAITING_AUTH)))
+        assertEquals(R.string.noti_connecting, outgoingTransferTitle(waiting.copy(stage = LiveStage.REQUESTED)))
+        assertEquals(R.string.noti_connecting, outgoingTransferTitle(waiting.copy(stage = LiveStage.WAITING_AUTH)))
     }
 
     @Test

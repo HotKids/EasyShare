@@ -12,18 +12,12 @@
     <string name="shizuku_desc">Get this device’s MAC with Shizuku</string>
     <string name="shizuku_unavailable">Start Shizuku first</string>
 
-    <string name="noti_connecting">Establishing connection</string>
-    <plurals name="noti_request_desc">
-        <item quantity="one">The other device requests to send %1$d file (%2$s)</item>
-        <item quantity="other">The other device requests to send %1$d files (%2$s)</item>
-    </plurals>
+    <string name="noti_connecting">Connecting</string>
     <string name="noti_request_desc_text">The other device requests to send text</string>
-    <string name="preparing_transmission">Preparing transfer</string>
     <string name="preparing_send">Preparing to send</string>
     <string name="preparing_receive">Preparing to receive</string>
     <string name="accept">Accept</string>
     <string name="reject">Decline</string>
-    <string name="ignore">Dismiss</string>
     <string name="noti_recv_interrupted">Receiving interrupted</string>
     <plurals name="noti_complete">
         <item quantity="one">%d file received and saved</item>
@@ -33,7 +27,6 @@
         <item quantity="one">Receiving interrupted · %d file saved</item>
         <item quantity="other">Receiving interrupted · %d files saved</item>
     </plurals>
-    <string name="stop">Stop receiving</string>
     <string name="stop_background_receive">Turn off background receiving</string>
     <string name="noti_receiver_title">Waiting to receive</string>
     <string name="bluetooth_disabled">Turn on Bluetooth</string>
@@ -70,16 +63,16 @@
 
     <string name="incoming_transfer_from">From %1$s</string>
     <string name="transfer_status_peer">%1$s · %2$s</string>
-    <string name="transfer_request_summary">%1$s wants to share %2$s.</string>
+    <string name="transfer_request_summary">%1$s wants to share %2$s</string>
     <string name="transfer_request_size">" (%1$s)"</string>
-    <string name="transfer_received_summary">Received %1$s %3$s from %2$s.</string>
-    <string name="transfer_saved_partial">%1$d/%2$d files saved.</string>
-    <string name="transfer_receiving">Receiving…</string>
+    <string name="transfer_received_summary">Received %2$s from %1$s</string>
+    <plurals name="transfer_saved_partial">
+        <item quantity="one">%1$d/%2$d file saved.</item>
+        <item quantity="other">%1$d/%2$d files saved.</item>
+    </plurals>
+    <string name="transfer_receiving">Receiving %1$s</string>
     <string name="transfer_saving">Saving files…</string>
-    <string name="transfer_canceling">Canceling transfer…</string>
-    <string name="transfer_image_type">images</string>
-    <string name="transfer_video_type">videos</string>
-    <string name="transfer_file_type">files</string>
+    <string name="transfer_canceling">Canceling…</string>
     <plurals name="transfer_images">
         <item quantity="one">%1$d image</item>
         <item quantity="other">%1$d images</item>
@@ -88,59 +81,25 @@
         <item quantity="one">%1$d video</item>
         <item quantity="other">%1$d videos</item>
     </plurals>
-    <plurals name="transfer_image_count">
-        <item quantity="other">%1$d</item>
-    </plurals>
-    <plurals name="transfer_file_count">
-        <item quantity="other">%1$d</item>
-    </plurals>
     <string name="outgoing_transfer_to">To %1$s</string>
-    <plurals name="incoming_request_summary">
-        <item quantity="one">%1$s requests to send %2$d file</item>
-        <item quantity="other">%1$s requests to send %2$d files</item>
-    </plurals>
-    <plurals name="incoming_receiving_summary">
-        <item quantity="one">Receiving %1$d file from %2$s</item>
-        <item quantity="other">Receiving %1$d files from %2$s</item>
-    </plurals>
-    <plurals name="incoming_received_summary">
-        <item quantity="one">Received %1$d file from %2$s</item>
-        <item quantity="other">Received %1$d files from %2$s</item>
-    </plurals>
-    <string name="incoming_request_text_summary">%1$s requests to send text</string>
-    <string name="incoming_receiving_text_summary">Receiving text from %1$s</string>
-    <string name="incoming_received_text_summary">Received text from %1$s</string>
     <plurals name="incoming_transfer_multiple">
         <item quantity="one">%1$d file</item>
         <item quantity="other">%1$d files</item>
     </plurals>
     <string name="incoming_transfer_timeout">The receive request timed out and was declined automatically</string>
-    <plurals name="incoming_receive_timeout_hint">
-        <item quantity="one">Automatically decline in %1$d second</item>
-        <item quantity="other">Automatically decline in %1$d seconds</item>
-    </plurals>
-    <string name="cancel_transfer">Cancel transfer</string>
     <string name="close">Close</string>
     <string name="open">Open</string>
     <string name="open_received_file_failed">Could not open the file. View it in the save location</string>
     <string name="msg_copied_to_clipboard">Text copied to clipboard</string>
     <string name="cancelled_by_user_local">Transfer canceled</string>
-    <string name="cancelled_by_user_remote">The other device canceled the transfer</string>
+    <string name="cancelled_by_user_remote">Canceled by the other device</string>
 
-    <string name="transferring_files">Transferring files</string>
-    <string name="sending_files">Sending files</string>
-    <string name="receiving_files">Receiving files</string>
-    <string name="finishing">Completing transfer</string>
     <string name="finishing_send">Waiting for receive result</string>
     <string name="finishing_receive">Saving</string>
-    <string name="done">Done</string>
-    <string name="done_partial">Partly complete</string>
-    <string name="response_waiting">Waiting for acceptance</string>
+    <string name="response_waiting">Connecting</string>
     <string name="auth_waiting">Waiting to confirm acceptance</string>
-    <string name="outgoing_auth_waiting">@string/response_waiting</string>
 
     <string name="device_brand">Device brand</string>
-    <string name="device_brand_value">%1$s · Waiting to receive</string>
     <string name="brand_receive_ready">%1$s · Waiting to receive</string>
     <string name="brand_receive_bluetooth_off">%1$s · Cannot receive. Turn on Bluetooth</string>
     <string name="brand_receive_wifi_off">%1$s · Cannot receive. Turn on Wi-Fi</string>
@@ -159,7 +118,6 @@
     <string name="home_brand_status">%1$s · %2$s</string>
     <string name="brand_android">Android</string>
     <string name="download_path">Save to</string>
-    <string name="choose_download_path">Choose save location</string>
     <string name="default_path">/Download/Easy Share</string>
     <string name="save">Save</string>
     <string name="cancel">Cancel</string>
@@ -171,21 +129,13 @@
     <string name="stage_send_fin">Confirming</string>
     <string name="stage_done">Done</string>
     <string name="shared_text">Text</string>
-    <string name="unnamed_file">Unnamed file</string>
     <string name="sender_identity_brand">%1$s (%2$s)</string>
-    <string name="text_file_type">TXT</string>
-    <string name="generic_file_type">FILE</string>
     <string name="device">Unknown device</string>
-    <string name="device_status_waiting">@string/response_waiting</string>
-    <string name="device_status_sending">@string/sending</string>
-    <string name="device_status_success">@string/send_ok</string>
-    <string name="device_status_partial">@string/send_partial</string>
-    <string name="device_status_failed">@string/send_fail</string>
     <string name="device_status_canceled">@string/cancelled_by_user_local</string>
     <string name="device_status_rejected">The other device declined</string>
     <string name="device_status_timeout">Transfer timed out</string>
     <string name="device_status_unconfirmed">Reception result unavailable</string>
-    <string name="no_nearby_devices">Looking for nearby devices…</string>
+    <string name="no_nearby_devices">Discovering nearby devices…</string>
     <string name="noti_chan_receiver_persistent">Ready to receive</string>
     <string name="noti_chan_sending">Sending files</string>
     <string name="noti_chan_receiving">Receiving files</string>

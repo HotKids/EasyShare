@@ -47,7 +47,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
@@ -82,6 +82,7 @@ import me.pipi.easyshare.models.TransferUiStatus
 import me.pipi.easyshare.models.WebSocketMessage
 import me.pipi.easyshare.models.LiveUpdatePriority
 import me.pipi.easyshare.models.LiveUpdateState
+import me.pipi.easyshare.ui.transfer.TransferCopy
 import me.pipi.easyshare.utils.BleUtils
 import me.pipi.easyshare.utils.DeviceUtils
 import me.pipi.easyshare.utils.JsonWithUnknownKeys
@@ -249,6 +250,11 @@ class P2pSenderService : BaseP2pService() {
         } else null
 
         val isText = task.files.singleOrNull()?.textContent != null
+        val mainCopyOnly = stage.usesSingleLineFileCopy(isText)
+        val title = getString(stage.titleResource(sending = true)).let {
+            if (mainCopyOnly) TransferCopy.withSize(this, it, task.files.sumOf { file -> file.size }, isText)
+            else it
+        }
         val attachmentSummary = if (isText) getString(R.string.shared_text) else {
             resources.getQuantityString(R.plurals.incoming_transfer_multiple, task.files.size, task.files.size)
         }
@@ -271,9 +277,9 @@ class P2pSenderService : BaseP2pService() {
 
         val state = LiveUpdateState(
             taskKey = NotificationUtils.taskKey("send", task.id),
-            title = getString(stage.titleResource(sending = true)),
-            content = content,
-            subText = getString(R.string.outgoing_transfer_to, task.device.displayName),
+            title = title,
+            content = if (mainCopyOnly) "" else content,
+            subText = if (mainCopyOnly) null else getString(R.string.outgoing_transfer_to, task.device.displayName),
             peerBrandId = task.device.brandId,
             stage = stage,
             isText = isText,
@@ -906,7 +912,7 @@ class P2pSenderService : BaseP2pService() {
     }
 
     @SuppressLint("MissingPermission")
-    @OptIn(ExperimentalCoroutinesApi::class)
+    @OptIn(DelicateCoroutinesApi::class)
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val alreadyRunning = synchronized(currentTaskLock) {
             if (currentJob == null) false else {
@@ -1045,7 +1051,11 @@ class P2pSenderService : BaseP2pService() {
         return NotificationCompat.Builder(this, NotificationUtils.SENDER_CHAN_ID)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .setSmallIcon(icon)
-            .setLargeIcon(Icon.createWithResource(this, DeviceUtils.deviceIconById(task.device.brandId)))
+            .apply {
+                DeviceUtils.knownDeviceIconById(task.device.brandId)?.let {
+                    setLargeIcon(Icon.createWithResource(this@P2pSenderService, it))
+                }
+            }
             .setContentIntent(taskContentIntent(task))
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setOnlyAlertOnce(true)
@@ -1081,12 +1091,17 @@ class P2pSenderService : BaseP2pService() {
         task: TaskInfo,
         partial: Boolean,
         textShared: Boolean,
-    ) =
-        createNotificationBuilder(task, R.drawable.ic_arrow_circle_up)
-            .setContentTitle(getString(if (partial) R.string.send_partial else R.string.send_ok))
-            .setSubText(task.device.displayName)
+    ): Notification {
+        val mainCopyOnly = !partial && !textShared
+        val title = getString(if (partial) R.string.send_partial else R.string.send_ok).let {
+            if (mainCopyOnly) TransferCopy.withSize(this, it, task.files.sumOf { file -> file.size }, isText = false)
+            else it
+        }
+        return createNotificationBuilder(task, R.drawable.ic_arrow_circle_up)
+            .setContentTitle(title)
+            .setSubText(if (mainCopyOnly) null else task.device.displayName)
             .setContentText(
-                getString(
+                if (mainCopyOnly) null else getString(
                     when {
                         partial -> R.string.noti_send_partial_body
                         textShared -> R.string.noti_send_text_complete_body
@@ -1096,6 +1111,7 @@ class P2pSenderService : BaseP2pService() {
             )
             .setAutoCancel(true)
             .build()
+    }
 
     override fun onDestroy() {
         if (internalReceiverRegistered) {

@@ -2,7 +2,6 @@ package me.pipi.easyshare
 
 import android.content.Context
 import android.content.Intent
-import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.os.SystemClock
@@ -31,6 +30,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
+import androidx.core.graphics.drawable.toDrawable
+import androidx.core.net.toUri
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.Lifecycle
@@ -39,7 +40,9 @@ import me.pipi.easyshare.models.IncomingTransferUiStatus
 import me.pipi.easyshare.models.ReceivedFile
 import me.pipi.easyshare.services.P2pReceiverService
 import me.pipi.easyshare.ui.theme.EasyShareTheme
-import me.pipi.easyshare.ui.transfer.TransferSheet
+import me.pipi.easyshare.ui.transfer.EasyShareSheetContainer
+import me.pipi.easyshare.ui.transfer.TransferSheetContent
+import me.pipi.easyshare.ui.transfer.TransferCopy
 import me.pipi.easyshare.ui.transfer.TransferVisualState
 import me.pipi.easyshare.ui.transfer.AttachmentKind
 import me.pipi.easyshare.ui.transfer.attachmentKind
@@ -63,7 +66,7 @@ class IncomingTransferActivity : ComponentActivity() {
 
         if (!readEntry(intent, savedInstanceState)) return
 
-        window.setBackgroundDrawable(ColorDrawable(android.graphics.Color.TRANSPARENT))
+        window.setBackgroundDrawable(android.graphics.Color.TRANSPARENT.toDrawable())
         window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
         window.attributes = window.attributes.apply { dimAmount = 0.18f }
         window.setLayout(
@@ -227,7 +230,7 @@ class IncomingTransferActivity : ComponentActivity() {
                     }
                 } else {
                     P2pReceiverService.receivedDirectoryIntent(
-                        this@IncomingTransferActivity, Uri.parse(requireNotNull(state.receiveDirectoryUri)),
+                        this@IncomingTransferActivity, requireNotNull(state.receiveDirectoryUri).toUri(),
                     )
                 }
                 if (transferTaskId != expectedTaskId) return@launch
@@ -331,25 +334,25 @@ private fun IncomingTransferScreen(
         Formatter.formatFileSize(context, it)
     }
     val isText = state.isText
-    val fileName = state.fileName.ifBlank { state.currentFileName ?: state.receivedFiles.firstOrNull()?.name.orEmpty() }
-    val kind = attachmentKind(fileName, state.mimeType, isText, state.fileCount)
-    val countLabel = incomingItemLabel(kind, state.fileCount)
+    val savedFiles = state.receivedFiles.takeIf { state.status == IncomingTransferUiStatus.SUCCESS && it.isNotEmpty() }
+    val fileName = savedFiles?.first()?.name ?: state.fileName.ifBlank { state.currentFileName.orEmpty() }
+    val mimeType = if (savedFiles != null) savedFiles.map { it.mimeType }.distinct().singleOrNull() else state.mimeType
+    val fileCount = savedFiles?.size ?: state.fileCount
+    val kind = attachmentKind(fileName, mimeType, isText, fileCount)
+    val countLabel = TransferCopy.itemLabel(context, fileName, mimeType, isText, fileCount)
     val statusLabel = stringResource(incomingTransferTitle(state.status, state.stage))
     val partyText = when (state.status) {
-        IncomingTransferUiStatus.REQUESTED -> stringResource(R.string.transfer_request_summary,
-            state.senderName, countLabel) + sizeLabel?.let { stringResource(R.string.transfer_request_size, it) }.orEmpty()
+        IncomingTransferUiStatus.REQUESTED -> TransferCopy.request(context, state.senderName, countLabel)
         IncomingTransferUiStatus.RECEIVING -> when {
-            state.cancelRequested -> stringResource(R.string.transfer_canceling)
-            state.stage == LiveStage.FINALIZING -> stringResource(R.string.transfer_saving)
-            state.stage == LiveStage.TRANSFERRING -> stringResource(R.string.transfer_receiving)
-            else -> stringResource(R.string.transfer_status_peer, statusLabel, state.senderName)
-        }
+                state.cancelRequested -> stringResource(R.string.transfer_canceling)
+                state.stage == LiveStage.FINALIZING -> stringResource(R.string.transfer_saving)
+                state.stage == LiveStage.TRANSFERRING -> TransferCopy.receiving(context, countLabel)
+                else -> statusLabel
+            }
         IncomingTransferUiStatus.SUCCESS -> if (isText) stringResource(R.string.msg_copied_to_clipboard)
-            else stringResource(R.string.transfer_received_summary, incomingReceivedCountLabel(kind,
-                state.receivedFiles.size.takeIf { it > 0 } ?: state.fileCount),
-                state.senderName, incomingItemTypeLabel(kind))
+            else TransferCopy.received(context, state.senderName, countLabel)
         IncomingTransferUiStatus.PARTIAL -> if (state.receivedFiles.isEmpty()) statusLabel
-            else stringResource(R.string.transfer_saved_partial, state.receivedFiles.size, state.fileCount)
+            else pluralStringResource(R.plurals.transfer_saved_partial, state.fileCount, state.receivedFiles.size, state.fileCount)
         IncomingTransferUiStatus.FAILED,
         IncomingTransferUiStatus.CANCELED -> stringResource(R.string.transfer_status_peer, statusLabel, state.senderName)
     }
@@ -383,7 +386,7 @@ private fun IncomingTransferScreen(
         IncomingTransferUiStatus.RECEIVING -> {
             secondaryActionLabel = null
             onSecondaryAction = null
-            primaryActionLabel = stringResource(R.string.cancel_transfer)
+            primaryActionLabel = stringResource(R.string.cancel)
             onPrimaryAction = onCancel
         }
 
@@ -423,52 +426,32 @@ private fun IncomingTransferScreen(
                 .clearAndSetSemantics {},
         )
         Box(modifier = Modifier.align(Alignment.BottomCenter)) {
-            TransferSheet(
+            EasyShareSheetContainer(
                 title = stringResource(R.string.app_name),
-                partyText = partyText,
-                partyIconRes = DeviceUtils.deviceIconById(state.brandId),
-                headlineText = "",
-                supportingText = null,
-                attachmentKind = kind,
-                visualState = visualState,
-                progress = state.progress.takeIf {
-                    visualState == TransferVisualState.PROGRESS
-                },
-                secondaryActionLabel = secondaryActionLabel,
-                onSecondaryAction = onSecondaryAction,
-                primaryActionLabel = primaryActionLabel,
-                onPrimaryAction = onPrimaryAction,
-                primaryActionEnabled = state.status != IncomingTransferUiStatus.RECEIVING || cancelEnabled,
-                message = state.errorMessage?.takeIf { !state.cancelRequested && it != statusLabel },
-                emphasizePrimary = state.status != IncomingTransferUiStatus.RECEIVING,
+                centerTitle = true,
                 onDismiss = onDismiss,
-                receivedFiles = state.receivedFiles,
-            )
+            ) {
+                TransferSheetContent(
+                    partyText = partyText,
+                    partyIconRes = DeviceUtils.knownDeviceIconById(state.brandId),
+                    attachmentKind = kind,
+                    visualState = visualState,
+                    progress = state.progress.takeIf {
+                        visualState == TransferVisualState.PROGRESS
+                    },
+                    secondaryActionLabel = secondaryActionLabel,
+                    onSecondaryAction = onSecondaryAction,
+                    primaryActionLabel = primaryActionLabel,
+                    onPrimaryAction = onPrimaryAction,
+                    primaryActionEnabled = state.status != IncomingTransferUiStatus.RECEIVING || cancelEnabled,
+                    message = state.errorMessage?.takeIf { !state.cancelRequested && it != statusLabel },
+                    emphasizePrimary = secondaryActionLabel != null,
+                    fileSize = sizeLabel?.takeUnless { isText },
+                )
+            }
         }
     }
 }
-
-@Composable
-private fun incomingItemLabel(kind: AttachmentKind, count: Int): String =
-    if (kind == AttachmentKind.TEXT) stringResource(R.string.shared_text)
-    else pluralStringResource(when (kind) {
-        AttachmentKind.IMAGE -> R.plurals.transfer_images
-        AttachmentKind.VIDEO -> R.plurals.transfer_videos
-        else -> R.plurals.incoming_transfer_multiple
-    }, count, count)
-
-@Composable
-private fun incomingReceivedCountLabel(kind: AttachmentKind, count: Int): String =
-    pluralStringResource(if (kind == AttachmentKind.IMAGE)
-        R.plurals.transfer_image_count else R.plurals.transfer_file_count, count, count)
-
-@Composable
-private fun incomingItemTypeLabel(kind: AttachmentKind): String =
-    stringResource(when (kind) {
-        AttachmentKind.IMAGE -> R.string.transfer_image_type
-        AttachmentKind.VIDEO -> R.string.transfer_video_type
-        else -> R.string.transfer_file_type
-    })
 
 internal fun incomingCancelGuardRemainingMillis(enabledAtMillis: Long, elapsedRealtimeMillis: Long): Long =
     if (enabledAtMillis > elapsedRealtimeMillis) enabledAtMillis - elapsedRealtimeMillis else 0L

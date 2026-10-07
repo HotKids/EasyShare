@@ -1,6 +1,7 @@
 package me.pipi.easyshare.ui.transfer
 
 import android.view.LayoutInflater
+import android.widget.FrameLayout
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.progressSemantics
@@ -32,7 +33,7 @@ internal fun MaterialWavyProgressIndicator(progress: Int?) {
             AndroidView(
                 modifier = Modifier.fillMaxSize().then(semantics),
                 factory = { context ->
-                    val indicator = (LayoutInflater.from(context).inflate(R.layout.transfer_wavy_progress, null, false)
+                    val indicator = (LayoutInflater.from(context).inflate(R.layout.transfer_wavy_progress, FrameLayout(context), false)
                         as CircularProgressIndicator).apply {
                         max = 100
                         isIndeterminate = progress == null

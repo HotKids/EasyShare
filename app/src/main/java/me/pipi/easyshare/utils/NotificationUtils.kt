@@ -9,7 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.drawable.Icon
 import android.net.Uri
-import android.os.Build
+import android.util.Log
 import android.widget.Toast
 import androidx.annotation.RequiresPermission
 import androidx.annotation.StringRes
@@ -35,12 +35,17 @@ enum class LiveStage {
 
     @StringRes
     fun titleResource(sending: Boolean): Int = when (this) {
-        INIT, PREPARING -> if (sending) R.string.preparing_send else R.string.preparing_receive
+        INIT, PREPARING -> if (sending) R.string.noti_connecting else R.string.preparing_receive
         HANDSHAKE -> R.string.noti_connecting
-        REQUESTED, WAITING_AUTH -> if (sending) R.string.response_waiting else R.string.auth_waiting
+        REQUESTED, WAITING_AUTH -> if (sending) R.string.noti_connecting else R.string.auth_waiting
         TRANSFERRING -> if (sending) R.string.sending else R.string.receiving
         FINALIZING -> if (sending) R.string.finishing_send else R.string.finishing_receive
         COMPLETED -> if (sending) R.string.send_ok else R.string.recv_ok
+    }
+
+    fun usesSingleLineFileCopy(isText: Boolean): Boolean = !isText && when (this) {
+        INIT, PREPARING, REQUESTED, HANDSHAKE, WAITING_AUTH, TRANSFERRING -> true
+        FINALIZING, COMPLETED -> false
     }
 
     fun notificationContent(currentFile: String?, attachmentSummary: String, completionSummary: String): String =
@@ -111,7 +116,7 @@ object NotificationUtils {
     )
 
     internal fun peerIconResource(state: LiveUpdateState): Int? = when (state.channelId) {
-        SENDER_CHAN_ID, RECEIVER_CHAN_ID -> DeviceUtils.deviceIconById(state.peerBrandId)
+        SENDER_CHAN_ID, RECEIVER_CHAN_ID -> DeviceUtils.knownDeviceIconById(state.peerBrandId)
         else -> null
     }
 
@@ -121,6 +126,8 @@ object NotificationUtils {
     internal fun dismissLiveUpdate(taskKey: String) {
         // Dismissal changes this task's presentation, never its transfer or decision.
         promotionPolicy.dismiss(taskKey)
+        Log.i("TransferNotification", "event=dismiss direction=" +
+            if (taskKey.startsWith("receive:")) "receive" else "send")
     }
 
     // Release only after the terminal job and its notification effects have finished.
@@ -214,13 +221,11 @@ object NotificationUtils {
         if (state.usesChronometer) {
             builder.setWhen(state.whenTime)
             builder.setUsesChronometer(true)
-            if (Build.VERSION.SDK_INT >= 31) {
-                builder.setChronometerCountDown(state.chronometerCountDown)
-            }
+            builder.setChronometerCountDown(state.chronometerCountDown)
         }
 
         state.cancelIntent?.let {
-            builder.addAction(R.drawable.ic_close, context.getString(R.string.cancel_transfer), it)
+            builder.addAction(R.drawable.ic_close, context.getString(R.string.cancel), it)
         }
 
         state.rejectIntent?.let {

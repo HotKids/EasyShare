@@ -1,5 +1,6 @@
 
 import java.io.File
+import com.android.build.api.variant.HostTestBuilder
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -33,8 +34,8 @@ android {
         applicationId = "me.pipi.easyshare"
         minSdk = 31
         targetSdk = 37
-        versionCode = 4
-        versionName = "0.4"
+        versionCode = 5
+        versionName = "1.0"
     }
 
     signingConfigs {
@@ -50,11 +51,7 @@ android {
 
     buildTypes {
         release {
-            signingConfig = if (hasReleaseSigningCredentials) {
-                signingConfigs.getByName("release")
-            } else {
-                signingConfigs.getByName("debug")
-            }
+            signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = true
             isShrinkResources = true
 
@@ -64,9 +61,17 @@ android {
             )
             matchingFallbacks += listOf()
         }
-        debug {
+    }
+
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a", "x86_64")
+            isUniversalApk = true
         }
     }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -79,12 +84,51 @@ android {
     }
 
     packaging {
+        // libpag's obsolete armeabi copies duplicate its ARMv7 binaries and are unsupported by the NDK.
+        jniLibs.excludes += "**/armeabi/**"
         resources {
+            merges += "META-INF/license/**"
             excludes += "META-INF/INDEX.LIST"
             excludes += "META-INF/*.properties"
             excludes += "META-INF/native-image/**"
             excludes += "org/fusesource/jansi/internal/native/**"
         }
+    }
+}
+
+androidComponents {
+    beforeVariants(selector().withBuildType("debug")) { variant ->
+        variant.enable = false
+    }
+    beforeVariants(selector().withBuildType("release")) { variant ->
+        variant.hostTests.getValue(HostTestBuilder.UNIT_TEST_TYPE).enable = true
+    }
+}
+
+val requireReleaseSigning = tasks.register("requireReleaseSigning") {
+    doLast {
+        check(providers.gradlePropertiesPrefixedBy("android.injected.signing.").get().isEmpty()) {
+            "Signing overrides are not allowed. Use the existing official SIGNING_* inputs."
+        }
+        check(hasReleaseSigningCredentials) {
+            "Official release signing credentials are required. Configure the existing SIGNING_* inputs."
+        }
+    }
+}
+
+// AGP skips signing validation for incomplete configurations and can otherwise package an unsigned APK.
+tasks.configureEach {
+    if (name == "packageRelease" || name == "signReleaseBundle") {
+        dependsOn(requireReleaseSigning)
+    }
+    // Bundle-to-APK conversion is a separate packaging path from native ABI splits.
+    if (name in setOf(
+            "packageReleaseUniversalApk",
+            "makeApkFromBundleForRelease",
+            "extractApksFromBundleForRelease",
+            "extractApksForRelease",
+        )) {
+        enabled = false
     }
 }
 
@@ -128,7 +172,4 @@ dependencies {
     implementation(libs.libpag)
 
     testImplementation(libs.junit4)
-
-    debugImplementation(libs.androidx.ui.tooling)
-    debugImplementation(libs.androidx.ui.test.manifest)
 }

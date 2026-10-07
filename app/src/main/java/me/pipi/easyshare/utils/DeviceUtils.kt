@@ -129,6 +129,10 @@ object DeviceUtils {
             ?: R.drawable.device_default
     }
 
+    @DrawableRes
+    fun knownDeviceIconById(id: Int?): Int? =
+        deviceIconById(id).takeUnless { it == R.drawable.device_default }
+
     @ColorInt
     fun devicePrimaryColorById(id: Int?): Int =
         BRAND_REGISTRY.firstOrNull { id != null && id in it.idRange }?.primaryColor

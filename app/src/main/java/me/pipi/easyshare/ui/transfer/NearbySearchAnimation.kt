@@ -51,12 +51,12 @@ fun NearbySearchAnimation(modifier: Modifier = Modifier) {
             }
         }
         Icon(
-            painter = painterResource(R.drawable.ic_easy_share_adaptive_monochrome),
+            painter = painterResource(R.drawable.easy_share_icon_foreground),
             contentDescription = null,
             tint = color,
-            // The bundled adaptive artwork has 42.8% ink, yielding a visible mark of about 33dp.
+            // Preserve a 33dp visible mark using the original foreground's alpha bounds.
             modifier = Modifier
-                .size(77.dp)
+                .size(46.164.dp)
                 .graphicsLayer { rotationZ = frame.value * 360f / ScanLoopEndFrame },
         )
     }

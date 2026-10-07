@@ -31,7 +31,14 @@
 # interoperability with alliance devices.
 -keep class me.pipi.easyshare.** { *; }
 -keep class org.libpag.** { *; }
--keep class io.netty.** { *; }
+# Optional LZF/LZ4 decoders and their factories are not installed in the transfer pipelines.
+-keep class !io.netty.handler.codec.compression.LzfDecompressor,
+    !io.netty.handler.codec.compression.LzfDecompressor$*,
+    !io.netty.handler.codec.compression.Lz4FrameDecoder,
+    !io.netty.handler.codec.compression.Lz4FrameDecoder$*,
+    !io.netty.handler.codec.compression.Lz4FrameDecompressor,
+    !io.netty.handler.codec.compression.Lz4FrameDecompressor$*,
+    io.netty.** { *; }
 -keep class io.ktor.** { *; }
 -keep class kotlinx.coroutines.** { *; }
 

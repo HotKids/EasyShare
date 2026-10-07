@@ -1,7 +1,7 @@
 package me.pipi.easyshare.utils
 
 import android.content.Context
-import android.net.Uri
+import androidx.core.net.toUri
 import android.util.AtomicFile
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -55,6 +55,6 @@ internal object ReceivedFilesSnapshot {
         require(isValidToken(token))
         val snapshot = AtomicFile(File(context.filesDir, "received-results/$token.json"))
         val json = snapshot.openRead().bufferedReader(Charsets.UTF_8).use { it.readText() }
-        return decode(json).map { ReceivedFile(it.name, Uri.parse(it.uri), it.mimeType) }
+        return decode(json).map { ReceivedFile(it.name, it.uri.toUri(), it.mimeType) }
     }
 }

@@ -34,17 +34,17 @@ jobs:
         uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
 
       - name: Install Android SDK packages
-        run: sdkmanager "platforms;android-37.0" "build-tools;37.0.0"
+        run: sdkmanager "platforms;android-37.0" "build-tools;37.0.0" "ndk;28.2.13676358"
 
       - name: Run tests and lint
-        run: ./gradlew testDebugUnitTest lintDebug --no-daemon
+        run: ./gradlew testReleaseUnitTest lintRelease --no-daemon
 
-      - name: Build release APK for pull request
+      - name: Verify release compilation for pull request
         if: github.event_name == 'pull_request'
-        run: ./gradlew assembleRelease --no-daemon
+        run: ./gradlew compileReleaseKotlin processReleaseResources minifyReleaseWithR8 --no-daemon
 
       - name: Upload verification reports
         if: always()
@@ -53,7 +53,7 @@ jobs:
           name: verification-reports
           path: |
             app/build/reports/tests/
-            app/build/reports/lint-results-debug.*
+            app/build/reports/lint-results-release.*
           if-no-files-found: warn
           retention-days: 14
 
@@ -82,26 +82,14 @@ jobs:
 
           ./gradlew assembleRelease --no-daemon
 
-          signed_apk="app/build/outputs/apk/release/app-release.apk"
-          test -f "$signed_apk"
+          universal_apk="app/build/outputs/apk/release/app-universal-release.apk"
+          arm64_apk="app/build/outputs/apk/release/app-arm64-v8a-release.apk"
+          test -f "$universal_apk"
+          test -f "$arm64_apk"
 
           mkdir -p release
-          cp "$signed_apk" release/easy-share-universal.apk
-          cp "$signed_apk" "$signing_dir/arm64-unaligned.apk"
-          zip -q -d "$signing_dir/arm64-unaligned.apk" \
-            'lib/armeabi/*' 'lib/armeabi-v7a/*' 'lib/x86/*' 'lib/x86_64/*'
-
-          "$build_tools/zipalign" -f 4 \
-            "$signing_dir/arm64-unaligned.apk" "$signing_dir/arm64-aligned.apk"
-
-          "$build_tools/apksigner" sign \
-            --ks "$keystore_path" \
-            --ks-key-alias "$SIGNING_KEY_ALIAS" \
-            --ks-pass env:SIGNING_STORE_PASSWORD \
-            --key-pass env:SIGNING_KEY_PASSWORD \
-            --v4-signing-enabled false \
-            --out release/easy-share-arm64.apk \
-            "$signing_dir/arm64-aligned.apk"
+          cp "$universal_apk" release/easy-share-universal.apk
+          cp "$arm64_apk" release/easy-share-arm64.apk
 
           rm -f "$keystore_path"
           unset SIGNING_KEYSTORE_PATH SIGNING_KEYSTORE_BASE64

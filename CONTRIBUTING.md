@@ -11,7 +11,7 @@
 ## 验证改动
 
 ```bash
-./gradlew testDebugUnitTest lintDebug assembleRelease
+./gradlew testReleaseUnitTest lintRelease compileReleaseKotlin processReleaseResources minifyReleaseWithR8
 ```
 
 涉及传输协议、Wi‑Fi Direct、BLE 或通知状态的改动，应至少完成一次双向真机互传。请勿在 Issue、日志或提交中包含 Wi‑Fi Direct 密码、会话令牌、私钥或其他敏感信息。

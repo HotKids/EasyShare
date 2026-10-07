@@ -9,7 +9,6 @@ import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Intent
 import android.content.Context
-import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Bundle
@@ -24,6 +23,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.graphics.drawable.toDrawable
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -31,8 +31,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -41,8 +41,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -57,11 +56,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LifecycleResumeEffect
@@ -75,10 +77,9 @@ import me.pipi.easyshare.services.P2pSenderService
 import me.pipi.easyshare.ui.theme.EasyShareTheme
 import me.pipi.easyshare.ui.transfer.EasyShareSheetContainer
 import me.pipi.easyshare.ui.transfer.EasyShareSheetActions
-import me.pipi.easyshare.ui.transfer.TransferSheet
+import me.pipi.easyshare.ui.transfer.TransferSheetContent
+import me.pipi.easyshare.ui.transfer.TransferSheetBody
 import me.pipi.easyshare.ui.transfer.TransferVisualState
-import me.pipi.easyshare.ui.transfer.TransferDirection
-import me.pipi.easyshare.ui.transfer.AttachmentKind
 import me.pipi.easyshare.ui.transfer.NearbySearchAnimation
 import me.pipi.easyshare.ui.transfer.attachmentKind
 import me.pipi.easyshare.utils.BleUtils
@@ -176,7 +177,7 @@ class ShareActivity : ComponentActivity() {
 
         ShizukuUtils.bindService()
 
-        window.setBackgroundDrawable(ColorDrawable(android.graphics.Color.TRANSPARENT))
+        window.setBackgroundDrawable(android.graphics.Color.TRANSPARENT.toDrawable())
         window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
         window.attributes = window.attributes.apply { dimAmount = 0.18f }
         window.setLayout(
@@ -283,21 +284,24 @@ fun ShareActivityContent(
                 .clearAndSetSemantics {},
         )
 
-        if (selectedTransfer == null) {
-            Box(modifier = Modifier.align(Alignment.BottomCenter)) {
-                EasyShareSheetContainer(
-                    title = stringResource(R.string.app_name),
-                    centerTitle = true,
-                    heightFraction = 0.48f,
-                    onDismiss = onDone,
-                ) {
-                    BoxWithConstraints(modifier = Modifier.weight(1f)) {
-                        if (discoveredDevices.isEmpty()) {
-                            EmptyDeviceState(modifier = Modifier.fillMaxSize())
-                        } else {
+        Box(modifier = Modifier.align(Alignment.BottomCenter)) {
+            EasyShareSheetContainer(
+                title = stringResource(R.string.app_name),
+                centerTitle = true,
+                animateSize = true,
+                onDismiss = onDone,
+            ) {
+                if (selectedTransfer == null) {
+                    if (discoveredDevices.isEmpty()) {
+                        EmptyDeviceState()
+                    } else {
+                        BoxWithConstraints(
+                            modifier = Modifier.weight(1f, fill = false)
+                                .heightIn(min = 300.dp).padding(top = 12.dp),
+                        ) {
                             LazyVerticalGrid(
-                                columns = GridCells.Fixed(nearbyDeviceColumns(maxWidth.value)),
-                                modifier = Modifier.fillMaxSize(),
+                                columns = GridCells.Fixed(nearbyDeviceColumns(maxWidth.value, LocalDensity.current.fontScale)),
+                                modifier = Modifier.heightIn(max = 288.dp).fillMaxSize(),
                                 horizontalArrangement = Arrangement.SpaceEvenly,
                                 verticalArrangement = Arrangement.spacedBy(
                                     if (maxWidth >= 600.dp) 22.dp else 12.dp,
@@ -322,8 +326,7 @@ fun ShareActivityContent(
                                                     task,
                                                 )
                                             ) {
-                                                context.startActivity(ShareActivity.createTransferIntent(context, task))
-                                                onDone()
+                                                selectedTransfer = OutgoingTransferPresentation.from(task)
                                             }
                                         },
                                     )
@@ -336,21 +339,18 @@ fun ShareActivityContent(
                         onSecondaryAction = null,
                         primaryActionLabel = stringResource(R.string.cancel),
                         onPrimaryAction = onDone,
-                        textActions = true,
+                    )
+                } else {
+                    val transfer = checkNotNull(selectedTransfer)
+                    OutgoingTransferSheet(
+                        transfer = transfer,
+                        state = selectedState,
+                        onCancel = {
+                            P2pSenderService.cancelTask(context, transfer.taskId, transfer.deviceId)
+                        },
+                        onDone = onDone,
                     )
                 }
-            }
-        } else {
-            val transfer = checkNotNull(selectedTransfer)
-            Box(modifier = Modifier.align(Alignment.BottomCenter)) {
-                OutgoingTransferSheet(
-                    transfer = transfer,
-                    state = selectedState,
-                    onCancel = {
-                        P2pSenderService.cancelTask(context, transfer.taskId, transfer.deviceId)
-                    },
-                    onDone = onDone,
-                )
             }
         }
     }
@@ -372,86 +372,45 @@ internal fun restoredTransferState(
         errorMessage = interruptedMessage)
 }
 
-private data class ShareAttachment(val title: String, val metadata: String?, val kind: AttachmentKind)
-
-@Composable
-private fun shareAttachment(
-    fileName: String,
-    mimeType: String,
-    fileCount: Int,
-    totalSize: Long,
-    isText: Boolean,
-    nameIsFallback: Boolean = false,
-): ShareAttachment {
-    val context = LocalContext.current
-    val kind = attachmentKind(fileName, mimeType, isText, fileCount)
-    val count = pluralStringResource(when (kind) {
-        AttachmentKind.IMAGE -> R.plurals.transfer_images
-        AttachmentKind.VIDEO -> R.plurals.transfer_videos
-        else -> R.plurals.incoming_transfer_multiple
-    }, fileCount, fileCount)
-    val title = when {
-        isText -> stringResource(R.string.shared_text)
-        fileCount > 1 -> count
-        fileName.isNotBlank() -> attachmentDisplayName(fileName, nameIsFallback, stringResource(R.string.unnamed_file))
-        else -> count
-    }
-    val size = totalSize.takeIf { it > 0 }?.let { Formatter.formatFileSize(context, it) }
-    return ShareAttachment(title,
-        if (isText) null else listOfNotNull(count.takeIf { fileCount == 1 && fileName.isNotBlank() }, size).joinToString(" · "),
-        kind)
-}
-
-internal fun attachmentDisplayName(fileName: String, nameIsFallback: Boolean, unnamedFile: String): String =
-    if (nameIsFallback) unnamedFile else fileName
-
-internal fun nearbyDeviceColumns(widthDp: Float): Int {
+internal fun nearbyDeviceColumns(widthDp: Float, fontScale: Float = 1f): Int {
     val horizontalPadding = if (widthDp >= 600f) 24f else 40f
-    return ((widthDp - horizontalPadding) / 118f).toInt().coerceAtLeast(1)
+    val cellWidth = 118f * fontScale.coerceAtLeast(1f)
+    return ((widthDp - horizontalPadding) / cellWidth).toInt().coerceAtLeast(1)
 }
 
 @Composable
-private fun OutgoingTransferSheet(
+private fun ColumnScope.OutgoingTransferSheet(
     transfer: OutgoingTransferPresentation,
     state: TransferUiState?,
     onCancel: () -> Unit,
     onDone: () -> Unit,
 ) {
+    val context = LocalContext.current
     val status = state?.status ?: TransferUiStatus.WAITING
     val inProgress = status == TransferUiStatus.WAITING || status == TransferUiStatus.SENDING
-    val statusLabel = stringResource(outgoingTransferTitle(state))
+    val statusLabel = stringResource(
+        if (status == TransferUiStatus.WAITING) R.string.noti_connecting else outgoingTransferTitle(state),
+    )
     val visualState = outgoingTransferVisual(state)
-    val attachment = shareAttachment(transfer.fileName, transfer.mimeType, transfer.fileCount,
-        transfer.totalSize, transfer.isText, transfer.nameIsFallback)
     val message = when (status) {
         TransferUiStatus.PARTIAL -> stringResource(R.string.noti_send_partial_body)
         TransferUiStatus.FAILED, TransferUiStatus.TIMEOUT, TransferUiStatus.UNCONFIRMED -> state?.errorMessage
         else -> null
     }
 
-    TransferSheet(
-        title = stringResource(R.string.app_name),
-        partyText = stringResource(R.string.transfer_status_peer, statusLabel, transfer.deviceName),
-        partyIconRes = DeviceUtils.deviceIconById(transfer.brandId),
-        headlineText = attachment.title,
-        supportingText = attachment.metadata,
-        attachmentKind = attachment.kind,
+    TransferSheetContent(
+        partyText = statusLabel,
+        partyIconRes = DeviceUtils.knownDeviceIconById(transfer.brandId),
+        attachmentKind = attachmentKind(transfer.fileName, transfer.mimeType, transfer.isText, transfer.fileCount),
         visualState = visualState,
         progress = state?.progress.takeIf { visualState == TransferVisualState.PROGRESS },
+        fileSize = transfer.totalSize.takeIf { it > 0L && !transfer.isText }?.let { Formatter.formatFileSize(context, it) },
         secondaryActionLabel = null,
         onSecondaryAction = null,
-        primaryActionLabel = stringResource(
-            when {
-                inProgress -> R.string.cancel_transfer
-                status == TransferUiStatus.SUCCESS || status == TransferUiStatus.PARTIAL -> R.string.close
-                else -> R.string.close
-            },
-        ),
+        primaryActionLabel = stringResource(if (inProgress) R.string.cancel else R.string.close),
         onPrimaryAction = if (inProgress) onCancel else onDone,
-        direction = TransferDirection.SEND,
         message = message,
-        emphasizePrimary = !inProgress,
-        onDismiss = onDone,
+        emphasizePrimary = false,
     )
 }
 
@@ -468,7 +427,7 @@ internal fun outgoingTransferTitle(state: TransferUiState?): Int = when (state?.
 }
 
 internal fun outgoingTransferVisual(state: TransferUiState?): TransferVisualState = when (state?.status ?: TransferUiStatus.WAITING) {
-    TransferUiStatus.WAITING -> if (state?.stage == LiveStage.WAITING_AUTH) TransferVisualState.FILE else TransferVisualState.CONNECTING
+    TransferUiStatus.WAITING -> TransferVisualState.FILE
     TransferUiStatus.SENDING -> if (state?.stage == LiveStage.FINALIZING) TransferVisualState.FINALIZING else TransferVisualState.PROGRESS
     TransferUiStatus.SUCCESS -> TransferVisualState.SUCCESS
     TransferUiStatus.PARTIAL -> TransferVisualState.PARTIAL
@@ -478,24 +437,9 @@ internal fun outgoingTransferVisual(state: TransferUiState?): TransferVisualStat
 }
 
 @Composable
-private fun EmptyDeviceState(modifier: Modifier = Modifier) {
-    Column(
-        modifier = modifier
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 32.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Top,
-    ) {
-        NearbySearchAnimation(
-            modifier = Modifier
-                .padding(top = 20.dp),
-        )
-        Text(
-            text = stringResource(R.string.no_nearby_devices),
-            style = MaterialTheme.typography.titleMedium,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.padding(top = 12.dp)
-        )
+private fun ColumnScope.EmptyDeviceState() {
+    TransferSheetBody(partyText = stringResource(R.string.no_nearby_devices)) {
+        NearbySearchAnimation(Modifier.size(84.dp))
     }
 }
 
@@ -505,15 +449,21 @@ private fun DeviceGridItem(
     enabled: Boolean,
     onClick: () -> Unit
 ) {
+    val sendLabel = stringResource(R.string.send)
     Surface(
+        onClick = onClick,
+        enabled = enabled,
+        shape = RoundedCornerShape(16.dp),
         color = Color.Transparent,
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(min = 92.dp)
-            .clickable(enabled = enabled, role = Role.Button,
-                onClickLabel = stringResource(R.string.send), onClick = onClick)
+            .semantics { role = Role.Button; onClick(label = sendLabel, action = null) }
     ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
             Box(
                 modifier = Modifier.size(48.dp),
                 contentAlignment = Alignment.Center
@@ -526,7 +476,7 @@ private fun DeviceGridItem(
             }
             Text(
                 text = device.displayName,
-                style = MaterialTheme.typography.bodyMedium,
+                style = MaterialTheme.typography.titleSmall,
                 textAlign = TextAlign.Center,
                 modifier = Modifier
                     .fillMaxWidth()
@@ -545,7 +495,7 @@ fun deviceScanner(): List<DiscoveredDevice> {
     LifecycleResumeEffect(context) {
         val manager = context.getSystemService(BluetoothManager::class.java)
         val adapter = manager.adapter
-        val devicesLock = Object()
+        val devicesLock = Any()
 
         val callback = object : ScanCallback() {
             override fun onScanFailed(errorCode: Int) {

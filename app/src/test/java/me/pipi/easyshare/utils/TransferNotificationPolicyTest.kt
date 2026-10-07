@@ -28,13 +28,13 @@ class TransferNotificationPolicyTest {
     }
 
     @Test
-    fun liveTitlesDistinguishPreparationConsentProgressAndFinalizationInBothDirections() {
+    fun notificationTitlesUseConnectionForOutgoingWaitingAndKeepTerminalStagesDistinct() {
         val expected = mapOf(
-            LiveStage.INIT to (R.string.preparing_send to R.string.preparing_receive),
-            LiveStage.PREPARING to (R.string.preparing_send to R.string.preparing_receive),
+            LiveStage.INIT to (R.string.noti_connecting to R.string.preparing_receive),
+            LiveStage.PREPARING to (R.string.noti_connecting to R.string.preparing_receive),
             LiveStage.HANDSHAKE to (R.string.noti_connecting to R.string.noti_connecting),
-            LiveStage.REQUESTED to (R.string.response_waiting to R.string.auth_waiting),
-            LiveStage.WAITING_AUTH to (R.string.response_waiting to R.string.auth_waiting),
+            LiveStage.REQUESTED to (R.string.noti_connecting to R.string.auth_waiting),
+            LiveStage.WAITING_AUTH to (R.string.noti_connecting to R.string.auth_waiting),
             LiveStage.TRANSFERRING to (R.string.sending to R.string.receiving),
             LiveStage.FINALIZING to (R.string.finishing_send to R.string.finishing_receive),
             LiveStage.COMPLETED to (R.string.send_ok to R.string.recv_ok),
@@ -43,6 +43,17 @@ class TransferNotificationPolicyTest {
             assertEquals(expected.getValue(stage).first, stage.titleResource(sending = true))
             assertEquals(expected.getValue(stage).second, stage.titleResource(sending = false))
         }
+    }
+
+    @Test
+    fun fileCardsUseOnlyTheMainCopyWhileTextAndFinalizationKeepTheirDetails() {
+        assertTrue(LiveStage.PREPARING.usesSingleLineFileCopy(isText = false))
+        assertTrue(LiveStage.WAITING_AUTH.usesSingleLineFileCopy(isText = false))
+        assertTrue(LiveStage.TRANSFERRING.usesSingleLineFileCopy(isText = false))
+        assertFalse(LiveStage.WAITING_AUTH.usesSingleLineFileCopy(isText = true))
+        assertFalse(LiveStage.TRANSFERRING.usesSingleLineFileCopy(isText = true))
+        assertFalse(LiveStage.FINALIZING.usesSingleLineFileCopy(isText = false))
+        assertFalse(LiveStage.COMPLETED.usesSingleLineFileCopy(isText = false))
     }
 
     @Test
@@ -58,16 +69,25 @@ class TransferNotificationPolicyTest {
     }
 
     @Test
-    fun unknownPeersUseAndroidWithoutInheritingThePreviousTaskBrand() {
+    fun unknownPeersOmitArtworkWithoutInheritingThePreviousTaskBrand() {
         listOf(null, -1, 0, 255, Int.MAX_VALUE).forEach { brand ->
             val state = LiveUpdateState(channelId = NotificationUtils.RECEIVER_CHAN_ID, peerBrandId = brand)
-            assertEquals(R.drawable.device_default, NotificationUtils.peerIconResource(state))
+            assertNull(NotificationUtils.peerIconResource(state))
         }
         val previous = LiveUpdateState(channelId = NotificationUtils.SENDER_CHAN_ID, peerBrandId = 10)
         assertEquals(R.drawable.device_oppo, NotificationUtils.peerIconResource(previous))
-        assertEquals(R.drawable.device_default, NotificationUtils.peerIconResource(
+        assertNull(NotificationUtils.peerIconResource(
             LiveUpdateState(channelId = NotificationUtils.SENDER_CHAN_ID),
         ))
+    }
+
+    @Test
+    fun brandsWithoutDedicatedArtworkDoNotPresentTheAndroidFallbackAsTheirLogo() {
+        listOf(114514, 90, 120).forEach { brand ->
+            assertNull(NotificationUtils.peerIconResource(LiveUpdateState(
+                channelId = NotificationUtils.RECEIVER_CHAN_ID, peerBrandId = brand,
+            )))
+        }
     }
 
     @Test

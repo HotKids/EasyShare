@@ -1,9 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Target a 49.6% foreground extent on the adaptive 108dp canvas. -->
+<!-- Center the unchanged source silhouette inside the adaptive-icon safe area. -->
 <inset xmlns:android="http://schemas.android.com/apk/res/android"
-    android:inset="-7.9158%">
+    android:insetLeft="15.307104%"
+    android:insetTop="16.526776%"
+    android:insetRight="15.307104%"
+    android:insetBottom="14.087432%">
     <bitmap
-        android:src="@drawable/ic_easy_share_adaptive_foreground"
+        android:src="@drawable/easy_share_icon_foreground"
         android:antialias="true"
         android:filter="true"
         android:gravity="fill" />

@@ -29,7 +29,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
-import android.os.Build
 import android.os.IBinder
 import android.os.ParcelUuid
 import android.os.SystemClock
@@ -79,7 +78,7 @@ class GattServerService : Service() {
     @Volatile
     private var destroyed = false
 
-    private val localDeviceInfoLock = Object()
+    private val localDeviceInfoLock = Any()
     private var localDeviceInfo = DeviceInfo(
         0,
         BleSecurity.getEncodedPublicKey(),
@@ -427,7 +426,7 @@ class GattServerService : Service() {
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
             )
         } catch (e: Exception) {
-            if (Build.VERSION.SDK_INT >= 31 && e is ForegroundServiceStartNotAllowedException) {
+            if (e is ForegroundServiceStartNotAllowedException) {
                 Log.e(TAG, "Service startup not allowed", e)
             } else {
                 Log.e(TAG, "Service startup failed", e)

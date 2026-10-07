@@ -20,15 +20,13 @@ fun Context.checkBluetoothPermissions(): Boolean {
         }
     }
 
-    if (Build.VERSION.SDK_INT >= 31) {
-        for (perm in listOf(
-            Manifest.permission.BLUETOOTH_ADVERTISE,
-            Manifest.permission.BLUETOOTH_SCAN,
-            Manifest.permission.BLUETOOTH_CONNECT
-        )) {
-            if (!hasPermission(perm)) {
-                return false
-            }
+    for (perm in listOf(
+        Manifest.permission.BLUETOOTH_ADVERTISE,
+        Manifest.permission.BLUETOOTH_SCAN,
+        Manifest.permission.BLUETOOTH_CONNECT
+    )) {
+        if (!hasPermission(perm)) {
+            return false
         }
     }
 
@@ -70,11 +68,9 @@ fun Context.missingTransferPermissions(includeNotifications: Boolean): List<Stri
             add(Manifest.permission.ACCESS_COARSE_LOCATION)
             add(Manifest.permission.ACCESS_FINE_LOCATION)
         }
-        if (Build.VERSION.SDK_INT >= 31) {
-            add(Manifest.permission.BLUETOOTH_ADVERTISE)
-            add(Manifest.permission.BLUETOOTH_SCAN)
-            add(Manifest.permission.BLUETOOTH_CONNECT)
-        }
+        add(Manifest.permission.BLUETOOTH_ADVERTISE)
+        add(Manifest.permission.BLUETOOTH_SCAN)
+        add(Manifest.permission.BLUETOOTH_CONNECT)
     }.distinct().filterNot(::hasPermission)
 }
 

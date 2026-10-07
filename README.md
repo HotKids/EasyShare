@@ -1,55 +1,125 @@
 # Easy Share
 
-[![Android CI](https://github.com/HotKids/EasyShare/actions/workflows/android.yml/badge.svg)](https://github.com/HotKids/EasyShare/actions/workflows/android.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Android 12+](https://img.shields.io/badge/Android-12%2B-3DDC84.svg)](https://developer.android.com/about/versions/12)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Easy Share 是一款兼容互传联盟协议的 Android 本地文件互传应用，可通过蓝牙发现附近的互传联盟设备，并使用 Wi‑Fi Direct 建立高速点对点连接。文件仅在设备之间直接传输，不依赖云端中转。
+与附近的互传联盟设备快速互传文件。
 
-> Easy Share 基于 [kmod-midori/CatShare](https://github.com/kmod-midori/CatShare) 开发，并在 Codex 协助下完成全面重构。项目在保留互传联盟兼容能力的基础上，重新设计了界面、交互与传输流程，并增强了设备识别、传输稳定性与安全性。感谢 CatShare 原作者及所有贡献者。
+Easy Share 是一款 Android 文件互传应用，可以分享单个文件、多个文件和文本。设备通过蓝牙发现彼此，再建立 Wi-Fi Direct 连接传输内容，文件不经过云端中转。
 
-## 功能
+## 适用设备
 
-- 支持单文件、多文件和文本分享
-- 兼容互传联盟 BLE/GATT 发现与协商流程
-- 使用 Wi‑Fi Direct、HTTPS 和 WebSocket 完成点对点传输
-- 支持接收确认、拒绝、取消、进度显示和结果通知
-- 自动识别 Pixel、Samsung、Xiaomi、Redmi、OnePlus、OPPO、vivo、Meizu 等设备品牌
-- 支持自定义设备名称、品牌和下载位置
-- 提供“互传联盟”快速设置磁贴
-- 发送前通过 Shizuku 获取本机 P2P MAC 地址
-- 会话级 TLS 证书校验、随机令牌和安全传输元数据
-- 针对 Android 16/17 及不同厂商 Wi‑Fi Direct 路由行为做了兼容处理
+- 两台安装 Easy Share 的 Android 设备。
+- Easy Share 与提供互传联盟功能的手机，例如小米/Redmi、OPPO、一加、vivo 等品牌的相关机型。
+- Pixel、三星及其他符合系统要求的 Android 设备，可以安装 Easy Share 使用上述功能。
 
-## 使用要求
+能否互传取决于机型、系统版本和对端的互传实现，不能保证同一品牌的所有设备均兼容。[CatShare 原项目的兼容记录](https://github.com/kmod-midori/CatShare#支持设备已测试)可供参考，不代表 Easy Share 已逐一验证这些机型。
 
-- Android 12（API 31）或更高版本
-- 发送和接收双方均需开启 Wi‑Fi 与蓝牙
-- 发送文件前必须启动 Shizuku 并完成授权，用于获取本机 Wi‑Fi Direct MAC 地址；仅接收文件不依赖 Shizuku
-- 默认接收目录为 `Downloads/Easy Share`
+Easy Share 使用互传联盟协议，目前不提供与系统 Quick Share 或 AirDrop 的协议互通。
 
-## 本地构建
+## 安装与准备
 
-项目使用 Gradle Wrapper，建议使用 JDK 21：
+已发布的 APK 请到 [GitHub Releases](https://github.com/HotKids/EasyShare/releases) 下载。多数手机可选择 `easy-share-arm64.apk`；不确定设备架构时，可选择 `easy-share-universal.apk`。
 
-```bash
-./gradlew testDebugUnitTest lintDebug assembleDebug
-```
+1.0 尚未发布。本文介绍当前项目的使用方式，已发布版本的具体功能请以对应发布说明为准。
 
-Release 构建会优先使用环境变量或用户级 Gradle 属性提供的正式签名；凭据缺失时自动回退到 debug 签名，确保新 clone 的项目仍可直接编译。GitHub Actions 只在临时目录恢复 release keystore，并在签名后立即删除，私钥不会进入仓库或构建产物。
+使用前请确认：
 
-## 自动发布
+- 本机运行 Android 12 或更高版本。
+- 发送和接收设备都已打开 Wi-Fi 与蓝牙；不要求连接同一个路由器。
+- 按应用提示允许附近设备、通知等必要权限。部分 Android 版本还会要求位置或本地网络权限。
+- 对端已进入互传接收状态，或已打开 Easy Share。
 
-- 推送到 `main`：执行测试、Lint、Release 构建，并生成正式签名 APK artifact
-- 创建 `v*` 标签：在完成验证和签名后自动创建 GitHub Release
-- 产物包含通用版和仅保留 `arm64-v8a` 的精简版 APK，并附带 SHA-256 校验文件
+仅接收文件不需要 Shizuku。发送时，如果系统无法提供本机 Wi-Fi Direct 连接地址，需要按下方“增强模式”的说明启动并授权 Shizuku。
 
-详细流程见 [发布说明](docs/RELEASING.md)。
+## 发送与接收
 
-## 参与贡献
+### 发送
 
-提交代码前请阅读 [贡献指南](CONTRIBUTING.md)。安全问题请按 [安全策略](SECURITY.md) 私下报告。
+1. 在相册、文件管理器或其他应用中选中要发送的内容，点击系统“分享”。
+2. 在分享面板中选择 **Easy Share**。
+3. 等待发现附近设备，再点选接收设备。
+4. 等待对方确认接收，随后查看传输进度和结果。需要停止时，点击“取消”。
 
-## 开源许可
+多个文件可以一同分享；文本也可从支持系统分享的应用中发送。对端如何处理文本取决于其互传实现。
 
-本项目基于 MIT License 发布，并保留 CatShare 原项目的版权声明。详见 [LICENSE](LICENSE)。
+### 接收
+
+1. 打开 Easy Share，按提示完成授权，并保持 Wi-Fi 与蓝牙开启。
+2. 让对方选择本机发送内容。
+3. 收到请求后核对发送者和内容，点击“接收”或“拒绝”。
+4. 接收完成后，可点击“打开”查看文件；多个文件会打开本次任务的保存目录。
+
+收到以文本消息传输的内容时，Easy Share 会将其复制到剪贴板。以文件形式传来的文本则按普通文件保存。
+
+## 首页设置
+
+### 设备名称与品牌
+
+点击首页的设备名称可以改名，方便对方找到本机。点击品牌图标可以选择品牌，或使用“自动识别”。这些设置用于分享时的设备身份。
+
+### 后台接收
+
+开启后，离开应用仍可等待附近设备的接收请求，并在通知中选择“接收”或“拒绝”。Wi-Fi、蓝牙和通知权限仍需保持可用；系统的后台运行限制也可能影响接收。
+
+还可以在手机快捷设置中添加 **“互传联盟”** 磁贴，用来开关后台接收。
+
+### 增强模式
+
+增强模式通过 Shizuku 获取本机的 Wi-Fi Direct 连接地址，用于发送时建立连接。部分系统会限制应用读取该地址，因此发送前可能需要完成以下设置：
+
+1. 按 [Shizuku 官方使用指南](https://shizuku.rikka.app/guide/setup/)安装并启动 Shizuku。
+2. 返回 Easy Share，在首页打开“增强模式”。
+3. 出现 Shizuku 授权提示时允许 Easy Share 使用。
+
+Shizuku 未运行时，该开关不可用。仅接收文件无需开启增强模式。
+
+### 安全互传
+
+开启后，仅接收支持安全协议的发送端分享的内容。不支持该协议的发送端会被拒绝，因此可能影响与部分原厂互传功能的兼容。
+
+### 保存位置
+
+默认保存到手机的 **Download/Easy Share** 文件夹。点击首页“保存位置”，可通过系统文件选择器指定其他目录。
+
+接收完成后也可在文件管理器中查看。更改保存位置不会移动以前收到的文件。
+
+### 调试日志
+
+点击“调试日志”会生成日志并打开系统分享面板，可用于反馈问题。上传前请检查并移除个人信息、连接密码和会话凭据。
+
+## 常见问题
+
+### 找不到附近设备
+
+确认双方距离较近、Wi-Fi 与蓝牙均已开启，Easy Share 的必要权限已允许，并让对端进入互传接收状态。不同厂商的接收入口可能位于分享面板、控制中心或互传应用中。
+
+### 能发现设备，但无法连接
+
+先确认对端仍在等待接收，且没有其他传输任务。发送端使用 Easy Share 时，检查 Shizuku 是否已启动、“增强模式”是否已授权。接收端开启“安全互传”时，还需确认发送端支持该协议。
+
+### 离开应用后收不到请求
+
+检查“后台接收”是否开启、通知权限是否允许，以及 Wi-Fi 与蓝牙是否仍开启。若系统限制了 Easy Share 在后台运行，请在系统应用设置中检查相关限制。
+
+### 为什么没有显示对方品牌图标
+
+对端不一定提供品牌信息，因此部分接收请求只显示发送者名称。名称也可能由对方自行修改，不能当作实际手机型号。未识别到品牌不代表文件无法接收，请结合发送者名称和分享内容确认请求。
+
+### 收到文件后无法打开
+
+“打开”需要手机上有能够处理该文件类型的应用。可以先到保存位置找到文件，再选择合适的应用打开。
+
+## 反馈与帮助
+
+使用问题和兼容性反馈请提交到 [GitHub Issues](https://github.com/HotKids/EasyShare/issues)。请提供 Easy Share 版本、双方设备型号与系统版本、发送或接收方向，以及能够复现问题的步骤。若附日志，请先移除其中的敏感信息。
+
+安全漏洞请按 [安全策略](SECURITY.md)私下报告。
+
+## 开发与致谢
+
+构建、签名及发布流程见 [发布说明](docs/RELEASING.md)，参与开发请阅读 [贡献指南](CONTRIBUTING.md)。
+
+Easy Share 基于 [kmod-midori/CatShare](https://github.com/kmod-midori/CatShare) 开发，并在 Codex 协助下进行重构。感谢 CatShare 原作者及所有贡献者。
+
+本项目采用 MIT License，并保留 CatShare 原项目的版权声明。详见 [LICENSE](LICENSE)。

@@ -3,10 +3,34 @@ package me.pipi.easyshare.utils
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DeviceUtilsTest {
+    @Test
+    fun p2pIdentityRejectsRedactedMalformedAndMulticastAddresses() {
+        listOf(null, "", "02:00:00:00:00:00", "00:00:00:00:00:00",
+            "ff:ff:ff:ff:ff:ff", "03:12:34:56:78:90", "00:12:34:56:78",
+            "00:12:34:56:78:gg").forEach {
+            assertNull(DeviceUtils.usableP2pDeviceAddress(it))
+        }
+        assertEquals("02:ab:cd:12:34:56", DeviceUtils.usableP2pDeviceAddress("02:AB:CD:12:34:56"))
+    }
+
+    @Test
+    fun pixelBrandRangeUsesTheGoogleArtwork() {
+        assertEquals(me.pipi.easyshare.R.drawable.device_google, DeviceUtils.deviceIconById(130))
+        assertEquals(me.pipi.easyshare.R.drawable.device_google, DeviceUtils.deviceIconById(139))
+    }
+
+    @Test
+    fun automaticAndUnknownOptionsKeepTheAndroidArtwork() {
+        listOf(null, -1, 0).forEach { id ->
+            assertEquals(me.pipi.easyshare.R.drawable.device_default, DeviceUtils.deviceIconById(id))
+        }
+    }
+
     @Test
     fun randomNetworkCredentialsUseExpectedAlphabetAndVary() {
         val first = DeviceUtils.getRandomChars(32)

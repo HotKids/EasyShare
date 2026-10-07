@@ -11,5 +11,6 @@ data class DiscoveredDevice(
     val name: String,
     val brandId: Int?,
     val brand: String?,
-    val supports5Ghz: Boolean
+    val supports5Ghz: Boolean,
+    val displayName: String = name,
 ) : Parcelable

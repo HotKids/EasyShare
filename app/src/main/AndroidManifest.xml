@@ -53,6 +53,15 @@
     <uses-permission android:name="${applicationId}.INTERNAL_BROADCASTS" />
     <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
 
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data
+                android:scheme="content"
+                android:mimeType="vnd.android.document/directory" />
+        </intent>
+    </queries>
+
     <application
         android:name=".MyApplication"
         android:allowBackup="false"
@@ -87,6 +96,14 @@
             android:excludeFromRecents="true"
             android:exported="false"
             android:theme="@style/Theme.EasyShare.ShareSheet" />
+        <activity
+            android:name=".OutgoingTransferActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:theme="@style/Theme.EasyShare.ShareSheet" />
+        <receiver
+            android:name=".utils.LiveUpdateDismissedReceiver"
+            android:exported="false" />
 
         <service
             android:name=".services.ReceiverTileService"

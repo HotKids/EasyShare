@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-<bitmap xmlns:android="http://schemas.android.com/apk/res/android"
-    android:src="@drawable/ic_easy_share_adaptive_monochrome"
-    android:antialias="true"
-    android:filter="true"
-    android:gravity="fill" />
+<inset xmlns:android="http://schemas.android.com/apk/res/android"
+    android:inset="-7.9158%">
+    <bitmap
+        android:src="@drawable/ic_easy_share_adaptive_monochrome"
+        android:antialias="true"
+        android:filter="true"
+        android:gravity="fill" />
+</inset>

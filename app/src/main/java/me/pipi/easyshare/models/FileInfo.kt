@@ -11,5 +11,5 @@ data class FileInfo(
     val mimeType: String,
     val size: Long,
     val textContent: String?,
+    val nameIsFallback: Boolean = false,
 ) : Parcelable
-

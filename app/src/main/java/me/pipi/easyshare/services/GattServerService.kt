@@ -19,6 +19,11 @@ import android.bluetooth.le.AdvertisingSet
 import android.bluetooth.le.AdvertisingSetCallback
 import android.bluetooth.le.AdvertisingSetParameters
 import android.bluetooth.le.BluetoothLeAdvertiser
+import android.bluetooth.le.BluetoothLeScanner
+import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanFilter
+import android.bluetooth.le.ScanResult
+import android.bluetooth.le.ScanSettings
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -31,17 +36,20 @@ import android.os.SystemClock
 import android.util.Log
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import me.pipi.easyshare.AppSettings
 import me.pipi.easyshare.BleSecurity
 import me.pipi.easyshare.BuildConfig
+import me.pipi.easyshare.MyApplication
 import me.pipi.easyshare.R
 import me.pipi.easyshare.SessionSecurity
 import me.pipi.easyshare.models.DeviceInfo
 import me.pipi.easyshare.models.P2pInfo
 import me.pipi.easyshare.utils.BleUtils
 import me.pipi.easyshare.utils.DeviceUtils
+import me.pipi.easyshare.utils.IncomingPeerIdentity
 import me.pipi.easyshare.utils.JsonWithUnknownKeys
 import me.pipi.easyshare.utils.NotificationUtils
 import me.pipi.easyshare.utils.ServiceState
@@ -66,6 +74,8 @@ class GattServerService : Service() {
     private var btAdvertiser: BluetoothLeAdvertiser? = null
 
     private var advertisingSet: AdvertisingSet? = null
+    private var peerScanner: BluetoothLeScanner? = null
+    private var peerCollectionId = 0L
     @Volatile
     private var destroyed = false
 
@@ -88,7 +98,15 @@ class GattServerService : Service() {
 
                 ServiceState.ACTION_STOP_SERVICE -> {
                     Log.i(GattServerService.TAG, "Received ACTION_STOP_SERVICE")
-                    stopSelf()
+                    MyApplication.getInstance().setBackgroundReceiveEnabled(false)
+                }
+
+                MyApplication.ACTION_BACKGROUND_RECEIVE_CHANGED -> {
+                    if (checkNotificationPermission()) {
+                        NotificationManagerCompat.from(this@GattServerService).notify(
+                            NotificationUtils.ID_RECEIVER_READY, createNotification()
+                        )
+                    }
                 }
             }
         }
@@ -115,6 +133,26 @@ class GattServerService : Service() {
 
     private var gattServer: BluetoothGattServer? = null
     private val pendingGattWrites = ConcurrentHashMap<BluetoothDevice, PendingGattWrite>()
+
+    @SuppressLint("MissingPermission")
+    private val peerScanCallback = object : ScanCallback() {
+        override fun onScanResult(callbackType: Int, result: ScanResult) {
+            if (destroyed) return
+            val record = result.scanRecord ?: return
+            try {
+                IncomingPeerIdentity.record(
+                    peerCollectionId, result.device.address,
+                    record.serviceData.mapKeys { it.key.uuid }, SystemClock.elapsedRealtime(),
+                )
+            } catch (_: SecurityException) {
+                Log.w(TAG, "Peer identity scan permission unavailable")
+            }
+        }
+
+        override fun onScanFailed(errorCode: Int) {
+            Log.w(TAG, "Peer identity scan failed: $errorCode")
+        }
+    }
 
     @SuppressLint("MissingPermission")
     private val gattServerCallback = object : BluetoothGattServerCallback() {
@@ -218,8 +256,30 @@ class GattServerService : Service() {
                 }
                 return
             }
-            val success = handleP2pWrite(device, value)
-            if (responseNeeded) {
+            MyApplication.getInstance().withGattResponse {
+                val success = handleP2pWrite(device, value)
+                if (responseNeeded) {
+                    gattServer?.sendResponse(
+                        device,
+                        requestId,
+                        if (success) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_FAILURE,
+                        0,
+                        null,
+                    )
+                }
+            }
+        }
+
+        override fun onExecuteWrite(device: BluetoothDevice, requestId: Int, execute: Boolean) {
+            MyApplication.getInstance().withGattResponse {
+                val pending = pendingGattWrites.remove(device)
+                val success = if (!execute) {
+                    true
+                } else if (pending == null || pending.length == 0 || pending.expectedLength != null) {
+                    false
+                } else {
+                    handleP2pPayload(device, pending.bytes.copyOf(pending.length))
+                }
                 gattServer?.sendResponse(
                     device,
                     requestId,
@@ -228,24 +288,6 @@ class GattServerService : Service() {
                     null,
                 )
             }
-        }
-
-        override fun onExecuteWrite(device: BluetoothDevice, requestId: Int, execute: Boolean) {
-            val pending = pendingGattWrites.remove(device)
-            val success = if (!execute) {
-                true
-            } else if (pending == null || pending.length == 0 || pending.expectedLength != null) {
-                false
-            } else {
-                handleP2pPayload(pending.bytes.copyOf(pending.length))
-            }
-            gattServer?.sendResponse(
-                device,
-                requestId,
-                if (success) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_FAILURE,
-                0,
-                null,
-            )
         }
 
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
@@ -259,7 +301,7 @@ class GattServerService : Service() {
                 val chunk = BleUtils.parseP2pPayloadChunk(value)
                 if (chunk == null) {
                     pendingGattWrites.remove(device)
-                    handleP2pPayload(value)
+                    handleP2pPayload(device, value)
                 } else {
                     handleP2pPayloadChunk(device, chunk)
                 }
@@ -301,10 +343,10 @@ class GattServerService : Service() {
             if (pending.length < chunk.totalSize) return true
 
             pendingGattWrites.remove(device)
-            return handleP2pPayload(pending.bytes.copyOf(pending.length))
+            return handleP2pPayload(device, pending.bytes.copyOf(pending.length))
         }
 
-        private fun handleP2pPayload(data: ByteArray): Boolean {
+        private fun handleP2pPayload(device: BluetoothDevice, data: ByteArray): Boolean {
             return try {
                 require(data.isNotEmpty() && data.size <= MAX_GATT_PAYLOAD_BYTES)
                 var p2pInfo: P2pInfo = JsonWithUnknownKeys.decodeFromString(
@@ -342,7 +384,9 @@ class GattServerService : Service() {
                     require(p2pInfo.authToken?.length in 32..128)
                     require(p2pInfo.certificateSha256?.matches(Regex("[0-9a-f]{64}")) == true)
                 }
-                startService(P2pReceiverService.getIntent(this@GattServerService, p2pInfo))
+                startService(P2pReceiverService.getIntent(this@GattServerService, p2pInfo).apply {
+                    putExtra(IncomingPeerIdentity.EXTRA_GATT_PEER_ADDRESS, device.address)
+                })
                 true
             } catch (error: Throwable) {
                 Log.w(TAG, "Rejected malformed GATT transfer metadata", error)
@@ -354,6 +398,7 @@ class GattServerService : Service() {
     override fun onCreate() {
         super.onCreate()
         destroyed = false
+        peerCollectionId = IncomingPeerIdentity.startCollection()
 
         if (!checkBluetoothPermissions() || !checkNotificationPermission()) {
             Toast.makeText(this, R.string.permission_not_granted, Toast.LENGTH_LONG).show()
@@ -398,13 +443,16 @@ class GattServerService : Service() {
         }
 
         startAdv()
+        startPeerScan()
 
         registerInternalBroadcastReceiver(internalReceiver, IntentFilter().apply {
             addAction(ServiceState.ACTION_QUERY_RECEIVER_STATE)
             addAction(ServiceState.ACTION_STOP_SERVICE)
+            addAction(MyApplication.ACTION_BACKGROUND_RECEIVE_CHANGED)
         })
         internalReceiverRegistered = true
         sendBroadcast(ServiceState.getUpdateIntent(true))
+        MyApplication.getInstance().onReceiverServiceStarted()
     }
 
     private fun createNotification(): Notification {
@@ -415,12 +463,17 @@ class GattServerService : Service() {
             PendingIntent.FLAG_IMMUTABLE
         )
 
-        return NotificationCompat.Builder(this, NotificationUtils.RECEIVER_FG_CHAN_ID)
+        return NotificationCompat.Builder(this, NotificationUtils.readyChannelId(this))
             .setSmallIcon(R.drawable.ic_sync_alt)
             .setContentTitle(getString(R.string.noti_receiver_title))
             .setContentText(getString(R.string.discoverable_desc))
-            .setPriority(NotificationCompat.PRIORITY_MAX)
-            .addAction(R.drawable.ic_close, getString(R.string.stop), pi)
+            .setContentIntent(NotificationUtils.mainContentIntent(this))
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .apply {
+                if (AppSettings(this@GattServerService).backgroundReceiveEnabled) {
+                    addAction(R.drawable.ic_close, getString(R.string.stop_background_receive), pi)
+                }
+            }
             .build()
     }
 
@@ -485,6 +538,19 @@ class GattServerService : Service() {
         }
     }
 
+    @SuppressLint("MissingPermission")
+    private fun startPeerScan() {
+        try {
+            val scanner = btManager.adapter.bluetoothLeScanner ?: return
+            val filter = ScanFilter.Builder().setServiceUuid(ParcelUuid(BleUtils.ADV_SERVICE_UUID)).build()
+            val settings = ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_POWER).build()
+            scanner.startScan(listOf(filter), settings, peerScanCallback)
+            peerScanner = scanner
+        } catch (_: Exception) {
+            Log.w(TAG, "Unable to start peer identity scan")
+        }
+    }
+
     private fun buildGattService(): BluetoothGattService {
         val svc = BluetoothGattService(
             BleUtils.SERVICE_UUID, BluetoothGattService.SERVICE_TYPE_PRIMARY
@@ -501,6 +567,13 @@ class GattServerService : Service() {
     @SuppressLint("MissingPermission")
     override fun onDestroy() {
         destroyed = true
+        IncomingPeerIdentity.stopCollection(peerCollectionId)
+        try {
+            peerScanner?.stopScan(peerScanCallback)
+        } catch (_: Exception) {
+            Log.w(TAG, "Unable to stop peer identity scan")
+        }
+        peerScanner = null
         if (internalReceiverRegistered) {
             unregisterReceiver(internalReceiver)
             internalReceiverRegistered = false
@@ -523,6 +596,7 @@ class GattServerService : Service() {
         gattServer = null
         pendingGattWrites.clear()
         super.onDestroy()
+        MyApplication.getInstance().onReceiverServiceStopped()
     }
 
     private fun updateMacAddress(mac: String) {
@@ -552,14 +626,6 @@ class GattServerService : Service() {
 
         fun getIntent(context: Context): Intent {
             return Intent(context, GattServerService::class.java)
-        }
-
-        fun start(context: Context) {
-            context.startService(getIntent(context))
-        }
-
-        fun stop(context: Context) {
-            context.stopService(getIntent(context))
         }
     }
 }

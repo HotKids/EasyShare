@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.os.IBinder
 import android.util.Log
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -66,7 +67,7 @@ object ShizukuUtils {
             .daemon(false)
             .processNameSuffix("service")
             .debuggable(BuildConfig.DEBUG)
-            .version(BuildConfig.VERSION_CODE)
+            .version(BuildConfig.VERSION_CODE * 100 + USER_SERVICE_REVISION)
     }
 
     fun unsafeBindService() {
@@ -126,6 +127,15 @@ object ShizukuUtils {
             return withContext(Dispatchers.IO) { nativeGetMacAddressByName(name) }
         }
 
+        return withMacService { it.getMacAddressByName(name) }
+    }
+
+    suspend fun getP2pDeviceAddress(context: Context): String? {
+        if (!AppSettings(context).enhancedModeEnabled) return null
+        return withMacService { it.p2pMacAddress }
+    }
+
+    private suspend fun withMacService(read: (IMacAddressService) -> String?): String? {
         return try {
             val current = synchronized(binderLock) { macService }
             val service = current ?: run {
@@ -137,12 +147,15 @@ object ShizukuUtils {
                 unsafeBindService()
                 withTimeoutOrNull(SERVICE_CONNECT_TIMEOUT_MS) { signal.await() }
             } ?: return null
-            withContext(Dispatchers.IO) { service.getMacAddressByName(name) }
+            withContext(Dispatchers.IO) { read(service) }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Throwable) {
-            Log.e(ShizukuUtils.TAG, "Failed to obtain requested interface address", e)
+            Log.e(ShizukuUtils.TAG, "Failed to obtain local address: ${e.javaClass.simpleName}")
             null
         }
     }
 
     private const val SERVICE_CONNECT_TIMEOUT_MS = 5_000L
+    private const val USER_SERVICE_REVISION = 1
 }

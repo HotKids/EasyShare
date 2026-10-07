@@ -8,6 +8,7 @@ import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Intent
+import android.content.Context
 import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.net.wifi.WifiManager
@@ -28,68 +29,65 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.Icon
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import me.pipi.easyshare.models.DiscoveredDevice
 import me.pipi.easyshare.models.FileInfo
 import me.pipi.easyshare.models.TaskInfo
+import me.pipi.easyshare.models.OutgoingTransferPresentation
 import me.pipi.easyshare.models.TransferUiState
 import me.pipi.easyshare.models.TransferUiStatus
 import me.pipi.easyshare.services.P2pSenderService
-import me.pipi.easyshare.ui.PagAnimation
 import me.pipi.easyshare.ui.theme.EasyShareTheme
 import me.pipi.easyshare.ui.transfer.EasyShareSheetContainer
 import me.pipi.easyshare.ui.transfer.EasyShareSheetActions
 import me.pipi.easyshare.ui.transfer.TransferSheet
 import me.pipi.easyshare.ui.transfer.TransferVisualState
-import me.pipi.easyshare.ui.transfer.fileTypeLabel
+import me.pipi.easyshare.ui.transfer.TransferDirection
+import me.pipi.easyshare.ui.transfer.AttachmentKind
+import me.pipi.easyshare.ui.transfer.NearbySearchAnimation
+import me.pipi.easyshare.ui.transfer.attachmentKind
 import me.pipi.easyshare.utils.BleUtils
 import me.pipi.easyshare.utils.DeviceUtils
 import me.pipi.easyshare.utils.NotificationUtils
 import me.pipi.easyshare.utils.ShizukuUtils
 import me.pipi.easyshare.utils.TAG
 import me.pipi.easyshare.utils.TransferUiCoordinator
+import me.pipi.easyshare.utils.LiveStage
 import me.pipi.easyshare.utils.missingTransferPermissions
 import java.nio.ByteBuffer
 import kotlin.random.Random
@@ -217,13 +215,29 @@ class ShareActivity : ComponentActivity() {
                 cr.openFileDescriptor(uri, "r")?.use { it.statSize }
             }.getOrNull()?.takeIf { it >= 0L } ?: 0L
         }
-        val name = displayName?.trim()?.takeIf { it.isNotEmpty() }
+        val suppliedName = displayName?.trim()?.takeIf { it.isNotEmpty() }
             ?: uri.lastPathSegment?.substringAfterLast('/')?.takeIf { it.isNotBlank() }
-            ?: "shared_file"
+        val name = suppliedName ?: "shared_file"
         val mimeType = cr.getType(uri)?.takeIf { it.isNotBlank() }
             ?: "application/octet-stream"
 
-        return FileInfo(uri, name, mimeType, reportedSize, null)
+        return FileInfo(uri, name, mimeType, reportedSize, null, nameIsFallback = suppliedName == null)
+    }
+
+    companion object {
+        fun createTransferIntent(context: Context, task: TaskInfo): Intent =
+            createTransferIntent(context, OutgoingTransferPresentation.from(task))
+
+        fun createTransferIntent(context: Context, presentation: OutgoingTransferPresentation): Intent =
+            Intent(context, OutgoingTransferActivity::class.java).apply {
+                data = Uri.Builder().scheme("easyshare").authority("sending")
+                    .appendPath(presentation.deviceId).appendPath(presentation.taskId.toString()).build()
+                addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                putExtra(OutgoingTransferActivity.EXTRA_PRESENTATION, presentation)
+                TransferUiCoordinator.states.value[presentation.deviceId]
+                    ?.takeIf { it.taskId == presentation.taskId }
+                    ?.let { putExtra(OutgoingTransferActivity.EXTRA_STATE, it) }
+            }
     }
 }
 
@@ -231,42 +245,42 @@ class ShareActivity : ComponentActivity() {
 fun ShareActivityContent(
     files: List<FileInfo>,
     onDone: () -> Unit,
+    initialTransfer: OutgoingTransferPresentation? = null,
+    fallbackState: TransferUiState? = null,
 ) {
     val context = LocalContext.current
-    val discoveredDevices = deviceScanner()
+    var selectedTransfer by rememberSaveable { mutableStateOf(initialTransfer) }
+    val discoveredDevices = if (selectedTransfer == null) deviceScanner() else emptyList()
     val transferStates by TransferUiCoordinator.states.collectAsState()
-    var selectedTransfer by remember { mutableStateOf<SelectedTransfer?>(null) }
+    var savedResult by rememberSaveable { mutableStateOf(fallbackState) }
     val selectedState = selectedTransfer?.let { transfer ->
-        transferStates[transfer.device.id]?.takeIf { it.taskId == transfer.taskId }
+        restoredTransferState(
+            transfer,
+            transferStates[transfer.deviceId],
+            savedResult,
+            stringResource(R.string.noti_send_interrupted),
+        )
+    }
+    androidx.compose.runtime.SideEffect {
+        if (selectedState != null && selectedState.status != TransferUiStatus.WAITING &&
+            selectedState.status != TransferUiStatus.SENDING) {
+            savedResult = selectedState
+        }
     }
     val outsideInteraction = remember { MutableInteractionSource() }
 
-    BackHandler {
-        val transfer = selectedTransfer
-        val status = selectedState?.status
-        if (
-            transfer != null &&
-            (status == null || status == TransferUiStatus.WAITING || status == TransferUiStatus.SENDING)
-        ) {
-            P2pSenderService.cancelTask(context, transfer.taskId)
-            onDone()
-        } else {
-            onDone()
-        }
-    }
+    BackHandler(onBack = onDone)
 
     Box(modifier = Modifier.fillMaxSize()) {
         Box(
             modifier = Modifier
-                .align(Alignment.TopCenter)
-                .fillMaxWidth()
-                .fillMaxHeight(0.48f)
+                .fillMaxSize()
                 .clickable(
                     interactionSource = outsideInteraction,
                     indication = null,
-                    enabled = selectedTransfer == null,
                     onClick = onDone,
-                ),
+                )
+                .clearAndSetSemantics {},
         )
 
         if (selectedTransfer == null) {
@@ -274,41 +288,42 @@ fun ShareActivityContent(
                 EasyShareSheetContainer(
                     title = stringResource(R.string.app_name),
                     centerTitle = true,
+                    heightFraction = 0.48f,
+                    onDismiss = onDone,
                 ) {
-                    Box(modifier = Modifier.weight(1f)) {
+                    BoxWithConstraints(modifier = Modifier.weight(1f)) {
                         if (discoveredDevices.isEmpty()) {
                             EmptyDeviceState(modifier = Modifier.fillMaxSize())
                         } else {
                             LazyVerticalGrid(
-                                columns = GridCells.Fixed(3),
+                                columns = GridCells.Fixed(nearbyDeviceColumns(maxWidth.value)),
                                 modifier = Modifier.fillMaxSize(),
                                 horizontalArrangement = Arrangement.SpaceEvenly,
-                                verticalArrangement = Arrangement.spacedBy(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(
+                                    if (maxWidth >= 600.dp) 22.dp else 12.dp,
+                                ),
                                 contentPadding = PaddingValues(
-                                    start = 20.dp,
+                                    start = if (maxWidth >= 600.dp) 12.dp else 20.dp,
                                     top = 8.dp,
-                                    end = 20.dp,
+                                    end = if (maxWidth >= 600.dp) 12.dp else 20.dp,
                                     bottom = 16.dp,
                                 ),
                             ) {
                                 items(discoveredDevices, key = { it.id }) { device ->
                                     DeviceGridItem(
                                         device = device,
-                                        state = null,
                                         enabled = true,
                                         onClick = {
                                             val taskId = Random.nextInt()
+                                            val task = TaskInfo(taskId, device, files)
                                             if (
                                                 P2pSenderService.startTaskChecked(
                                                     context,
-                                                    TaskInfo(
-                                                        id = taskId,
-                                                        device = device,
-                                                        files = files,
-                                                    ),
+                                                    task,
                                                 )
                                             ) {
-                                                selectedTransfer = SelectedTransfer(device, taskId)
+                                                context.startActivity(ShareActivity.createTransferIntent(context, task))
+                                                onDone()
                                             }
                                         },
                                     )
@@ -321,6 +336,7 @@ fun ShareActivityContent(
                         onSecondaryAction = null,
                         primaryActionLabel = stringResource(R.string.cancel),
                         onPrimaryAction = onDone,
+                        textActions = true,
                     )
                 }
             }
@@ -328,12 +344,10 @@ fun ShareActivityContent(
             val transfer = checkNotNull(selectedTransfer)
             Box(modifier = Modifier.align(Alignment.BottomCenter)) {
                 OutgoingTransferSheet(
-                    files = files,
                     transfer = transfer,
                     state = selectedState,
                     onCancel = {
-                        P2pSenderService.cancelTask(context, transfer.taskId)
-                        onDone()
+                        P2pSenderService.cancelTask(context, transfer.taskId, transfer.deviceId)
                     },
                     onDone = onDone,
                 )
@@ -342,122 +356,145 @@ fun ShareActivityContent(
     }
 }
 
-private data class SelectedTransfer(
-    val device: DiscoveredDevice,
-    val taskId: Int,
-)
+internal fun restoredTransferState(
+    transfer: OutgoingTransferPresentation,
+    current: TransferUiState?,
+    snapshot: TransferUiState?,
+    interruptedMessage: String,
+): TransferUiState {
+    fun TransferUiState.matches() = taskId == transfer.taskId && deviceId == transfer.deviceId
+    current?.takeIf { it.matches() }?.let { return it }
+    snapshot?.takeIf {
+        it.matches() && it.status != TransferUiStatus.WAITING && it.status != TransferUiStatus.SENDING
+    }?.let { return it }
+    // An active service cannot survive process death; restoring its old percentage would invent progress.
+    return TransferUiState(transfer.taskId, transfer.deviceId, TransferUiStatus.FAILED,
+        errorMessage = interruptedMessage)
+}
+
+private data class ShareAttachment(val title: String, val metadata: String?, val kind: AttachmentKind)
+
+@Composable
+private fun shareAttachment(
+    fileName: String,
+    mimeType: String,
+    fileCount: Int,
+    totalSize: Long,
+    isText: Boolean,
+    nameIsFallback: Boolean = false,
+): ShareAttachment {
+    val context = LocalContext.current
+    val kind = attachmentKind(fileName, mimeType, isText, fileCount)
+    val count = pluralStringResource(when (kind) {
+        AttachmentKind.IMAGE -> R.plurals.transfer_images
+        AttachmentKind.VIDEO -> R.plurals.transfer_videos
+        else -> R.plurals.incoming_transfer_multiple
+    }, fileCount, fileCount)
+    val title = when {
+        isText -> stringResource(R.string.shared_text)
+        fileCount > 1 -> count
+        fileName.isNotBlank() -> attachmentDisplayName(fileName, nameIsFallback, stringResource(R.string.unnamed_file))
+        else -> count
+    }
+    val size = totalSize.takeIf { it > 0 }?.let { Formatter.formatFileSize(context, it) }
+    return ShareAttachment(title,
+        if (isText) null else listOfNotNull(count.takeIf { fileCount == 1 && fileName.isNotBlank() }, size).joinToString(" · "),
+        kind)
+}
+
+internal fun attachmentDisplayName(fileName: String, nameIsFallback: Boolean, unnamedFile: String): String =
+    if (nameIsFallback) unnamedFile else fileName
+
+internal fun nearbyDeviceColumns(widthDp: Float): Int {
+    val horizontalPadding = if (widthDp >= 600f) 24f else 40f
+    return ((widthDp - horizontalPadding) / 118f).toInt().coerceAtLeast(1)
+}
 
 @Composable
 private fun OutgoingTransferSheet(
-    files: List<FileInfo>,
-    transfer: SelectedTransfer,
+    transfer: OutgoingTransferPresentation,
     state: TransferUiState?,
     onCancel: () -> Unit,
     onDone: () -> Unit,
 ) {
-    val context = LocalContext.current
     val status = state?.status ?: TransferUiStatus.WAITING
     val inProgress = status == TransferUiStatus.WAITING || status == TransferUiStatus.SENDING
-    val statusText = when (status) {
-        TransferUiStatus.WAITING -> stringResource(R.string.response_waiting)
-        TransferUiStatus.SENDING -> stringResource(R.string.device_status_sending)
-        TransferUiStatus.SUCCESS -> stringResource(R.string.send_ok)
-        TransferUiStatus.PARTIAL -> stringResource(R.string.send_partial)
-        TransferUiStatus.FAILED -> stringResource(R.string.send_fail)
-        TransferUiStatus.CANCELED -> stringResource(R.string.device_status_canceled)
-        TransferUiStatus.REJECTED -> stringResource(R.string.device_status_rejected)
-        TransferUiStatus.TIMEOUT -> stringResource(R.string.device_status_timeout)
-    }
-    val firstFile = files.first()
-    val totalSize = files.sumOf { it.size }
-    val sizeLabel = totalSize.takeIf { it > 0L }?.let { Formatter.formatFileSize(context, it) }
-    val isText = files.size == 1 && firstFile.textContent != null
-    val fileName = firstFile.name.takeIf { files.size == 1 && it.isNotBlank() }
-    val headline = when {
-        isText -> stringResource(R.string.shared_text)
-        fileName != null -> fileName
-        else -> pluralStringResource(
-            R.plurals.incoming_transfer_multiple,
-            files.size,
-            files.size,
-        )
-    }
-    val supporting = when (status) {
-        TransferUiStatus.WAITING -> statusText
-        TransferUiStatus.SENDING -> null
-
-        else -> listOfNotNull(sizeLabel, statusText).joinToString(" · ")
-    }
-    val visualState = when (status) {
-        TransferUiStatus.WAITING -> TransferVisualState.FILE
-        TransferUiStatus.SENDING -> TransferVisualState.PROGRESS
-
-        TransferUiStatus.SUCCESS,
-        TransferUiStatus.PARTIAL -> TransferVisualState.SUCCESS
-
-        TransferUiStatus.FAILED,
-        TransferUiStatus.CANCELED,
-        TransferUiStatus.REJECTED,
-        TransferUiStatus.TIMEOUT -> TransferVisualState.FAILURE
+    val statusLabel = stringResource(outgoingTransferTitle(state))
+    val visualState = outgoingTransferVisual(state)
+    val attachment = shareAttachment(transfer.fileName, transfer.mimeType, transfer.fileCount,
+        transfer.totalSize, transfer.isText, transfer.nameIsFallback)
+    val message = when (status) {
+        TransferUiStatus.PARTIAL -> stringResource(R.string.noti_send_partial_body)
+        TransferUiStatus.FAILED, TransferUiStatus.TIMEOUT, TransferUiStatus.UNCONFIRMED -> state?.errorMessage
+        else -> null
     }
 
     TransferSheet(
         title = stringResource(R.string.app_name),
-        partyText = stringResource(R.string.outgoing_transfer_to, transfer.device.name),
-        partyIconRes = DeviceUtils.deviceIconById(transfer.device.brandId),
-        headlineText = headline,
-        supportingText = supporting,
-        fileTypeLabel = fileTypeLabel(
-            firstFile.name,
-            isText = isText,
-            textLabel = stringResource(R.string.text_file_type),
-            fallbackLabel = stringResource(R.string.generic_file_type),
-        ),
+        partyText = stringResource(R.string.transfer_status_peer, statusLabel, transfer.deviceName),
+        partyIconRes = DeviceUtils.deviceIconById(transfer.brandId),
+        headlineText = attachment.title,
+        supportingText = attachment.metadata,
+        attachmentKind = attachment.kind,
         visualState = visualState,
-        progress = when (status) {
-            TransferUiStatus.SENDING -> state?.progress ?: 0
-            else -> null
-        },
+        progress = state?.progress.takeIf { visualState == TransferVisualState.PROGRESS },
         secondaryActionLabel = null,
         onSecondaryAction = null,
         primaryActionLabel = stringResource(
             when {
-                inProgress -> R.string.cancel
-                status == TransferUiStatus.SUCCESS || status == TransferUiStatus.PARTIAL -> R.string.done
+                inProgress -> R.string.cancel_transfer
+                status == TransferUiStatus.SUCCESS || status == TransferUiStatus.PARTIAL -> R.string.close
                 else -> R.string.close
             },
         ),
         onPrimaryAction = if (inProgress) onCancel else onDone,
+        direction = TransferDirection.SEND,
+        message = message,
+        emphasizePrimary = !inProgress,
+        onDismiss = onDone,
     )
+}
+
+internal fun outgoingTransferTitle(state: TransferUiState?): Int = when (state?.status ?: TransferUiStatus.WAITING) {
+    TransferUiStatus.WAITING -> (state?.stage ?: LiveStage.INIT).titleResource(sending = true)
+    TransferUiStatus.SENDING -> (state?.stage ?: LiveStage.TRANSFERRING).titleResource(sending = true)
+    TransferUiStatus.SUCCESS -> R.string.send_ok
+    TransferUiStatus.PARTIAL -> R.string.send_partial
+    TransferUiStatus.FAILED -> R.string.send_fail
+    TransferUiStatus.CANCELED -> R.string.device_status_canceled
+    TransferUiStatus.REJECTED -> R.string.device_status_rejected
+    TransferUiStatus.TIMEOUT -> R.string.device_status_timeout
+    TransferUiStatus.UNCONFIRMED -> R.string.device_status_unconfirmed
+}
+
+internal fun outgoingTransferVisual(state: TransferUiState?): TransferVisualState = when (state?.status ?: TransferUiStatus.WAITING) {
+    TransferUiStatus.WAITING -> if (state?.stage == LiveStage.WAITING_AUTH) TransferVisualState.FILE else TransferVisualState.CONNECTING
+    TransferUiStatus.SENDING -> if (state?.stage == LiveStage.FINALIZING) TransferVisualState.FINALIZING else TransferVisualState.PROGRESS
+    TransferUiStatus.SUCCESS -> TransferVisualState.SUCCESS
+    TransferUiStatus.PARTIAL -> TransferVisualState.PARTIAL
+    TransferUiStatus.CANCELED, TransferUiStatus.REJECTED, TransferUiStatus.TIMEOUT -> TransferVisualState.CANCELED
+    TransferUiStatus.FAILED -> TransferVisualState.FAILURE
+    TransferUiStatus.UNCONFIRMED -> TransferVisualState.FAILURE
 }
 
 @Composable
 private fun EmptyDeviceState(modifier: Modifier = Modifier) {
     Column(
         modifier = modifier
-            .navigationBarsPadding()
+            .verticalScroll(rememberScrollState())
             .padding(horizontal = 32.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Top,
     ) {
-        PagAnimation(
-            lightAsset = "pag/sending_bg.pag",
-            darkAsset = "pag/sending_bg_dark.pag",
+        NearbySearchAnimation(
             modifier = Modifier
-                .padding(top = 20.dp)
-                .size(width = 268.dp, height = 93.dp),
+                .padding(top = 20.dp),
         )
         Text(
             text = stringResource(R.string.no_nearby_devices),
             style = MaterialTheme.typography.titleMedium,
-            modifier = Modifier.padding(top = 20.dp)
-        )
-        Text(
-            text = stringResource(R.string.scanning_desc),
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
-            modifier = Modifier.padding(top = 8.dp)
+            modifier = Modifier.padding(top = 12.dp)
         )
     }
 }
@@ -465,118 +502,39 @@ private fun EmptyDeviceState(modifier: Modifier = Modifier) {
 @Composable
 private fun DeviceGridItem(
     device: DiscoveredDevice,
-    state: TransferUiState?,
     enabled: Boolean,
     onClick: () -> Unit
 ) {
-    val isError = when (state?.status) {
-        TransferUiStatus.FAILED,
-        TransferUiStatus.CANCELED,
-        TransferUiStatus.REJECTED,
-        TransferUiStatus.TIMEOUT -> true
-
-        else -> false
-    }
-    val resultIcon = when (state?.status) {
-        TransferUiStatus.SUCCESS,
-        TransferUiStatus.PARTIAL -> R.drawable.ic_check_circle
-        TransferUiStatus.FAILED,
-        TransferUiStatus.CANCELED,
-        TransferUiStatus.REJECTED,
-        TransferUiStatus.TIMEOUT -> R.drawable.ic_error
-
-        else -> null
-    }
-    val statusText = when (state?.status) {
-        TransferUiStatus.WAITING -> stringResource(R.string.device_status_waiting)
-        TransferUiStatus.SENDING -> stringResource(R.string.device_status_sending)
-        TransferUiStatus.SUCCESS -> stringResource(R.string.device_status_success)
-        TransferUiStatus.PARTIAL -> stringResource(R.string.device_status_partial)
-        TransferUiStatus.FAILED -> stringResource(R.string.device_status_failed)
-        TransferUiStatus.CANCELED -> stringResource(R.string.device_status_canceled)
-        TransferUiStatus.REJECTED -> stringResource(R.string.device_status_rejected)
-        TransferUiStatus.TIMEOUT -> stringResource(R.string.device_status_timeout)
-        null -> device.brand ?: stringResource(R.string.unknown)
-    }
-
     Surface(
         color = Color.Transparent,
         modifier = Modifier
             .fillMaxWidth()
-            .height(deviceItemHeight(state))
-            .clickable(enabled = enabled, onClick = onClick)
+            .heightIn(min = 92.dp)
+            .clickable(enabled = enabled, role = Role.Button,
+                onClickLabel = stringResource(R.string.send), onClick = onClick)
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Box(
-                modifier = Modifier.size(62.dp),
+                modifier = Modifier.size(48.dp),
                 contentAlignment = Alignment.Center
             ) {
-                if (state != null) {
-                    if (state.status == TransferUiStatus.WAITING) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.fillMaxSize(),
-                            strokeWidth = 2.dp
-                        )
-                    } else {
-                        CircularProgressIndicator(
-                            progress = { state.progress.coerceIn(0, 100) / 100f },
-                            modifier = Modifier.fillMaxSize(),
-                            color = if (isError) {
-                                MaterialTheme.colorScheme.error
-                            } else {
-                                MaterialTheme.colorScheme.primary
-                            },
-                            trackColor = MaterialTheme.colorScheme.surfaceVariant,
-                            strokeWidth = 2.dp
-                        )
-                    }
-                }
                 Image(
                     painter = painterResource(DeviceUtils.deviceIconById(device.brandId)),
                     contentDescription = device.brand,
-                    modifier = Modifier.size(54.dp)
+                    modifier = Modifier.size(40.dp)
                 )
-                resultIcon?.let {
-                    Icon(
-                        painter = painterResource(it),
-                        contentDescription = statusText,
-                        tint = if (isError) {
-                            MaterialTheme.colorScheme.error
-                        } else {
-                            MaterialTheme.colorScheme.primary
-                        },
-                        modifier = Modifier
-                            .align(Alignment.BottomEnd)
-                            .size(22.dp)
-                    )
-                }
             }
             Text(
-                text = device.name,
-                fontSize = 12.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
+                text = device.displayName,
+                style = MaterialTheme.typography.bodyMedium,
                 textAlign = TextAlign.Center,
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(top = 6.dp)
             )
-            if (state != null) {
-                Text(
-                    text = statusText,
-                    fontSize = 9.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
         }
     }
 }
-
-private fun deviceItemHeight(state: TransferUiState?): Dp = if (state == null) 92.dp else 116.dp
 
 @SuppressLint("MissingPermission")
 @Composable
@@ -598,6 +556,7 @@ fun deviceScanner(): List<DiscoveredDevice> {
                 val record = result.scanRecord ?: return
                 var supports5Ghz = false
                 var deviceName: String? = null
+                var deviceDisplayName: String? = null
                 var brandId: Int? = null
                 var senderId: String? = null
 
@@ -617,6 +576,7 @@ fun deviceScanner(): List<DiscoveredDevice> {
                             // Data contains device name and ID
                             senderId = BleUtils.senderIdFromAdvertisement(data)
                             deviceName = BleUtils.deviceNameFromAdvertisement(data)
+                            deviceDisplayName = BleUtils.deviceDisplayNameFromAdvertisement(data)
                         }
                     }
                 }
@@ -635,7 +595,8 @@ fun deviceScanner(): List<DiscoveredDevice> {
                     name = deviceName,
                     brandId = brandId,
                     brand = brand,
-                    supports5Ghz = supports5Ghz
+                    supports5Ghz = supports5Ghz,
+                    displayName = deviceDisplayName ?: deviceName,
                 )
                 var replaced = false
                 synchronized(devicesLock) {

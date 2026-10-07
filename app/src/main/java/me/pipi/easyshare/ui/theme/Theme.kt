@@ -24,7 +24,7 @@ private val DarkColorScheme = darkColorScheme(
     outlineVariant = FlymeDarkOutline,
 )
 
-private val LightColorScheme = lightColorScheme(
+internal val LightColorScheme = lightColorScheme(
     primary = EasyShareBlue,
     onPrimary = androidx.compose.ui.graphics.Color.White,
     primaryContainer = androidx.compose.ui.graphics.Color(0xFFC4F0FB),

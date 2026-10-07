@@ -1,7 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Density-specific 108dp transparent canvas, matching the proven Pipi launcher setup. -->
-<bitmap xmlns:android="http://schemas.android.com/apk/res/android"
-    android:src="@drawable/ic_easy_share_adaptive_foreground"
-    android:antialias="true"
-    android:filter="true"
-    android:gravity="fill" />
+<!-- Target a 49.6% foreground extent on the adaptive 108dp canvas. -->
+<inset xmlns:android="http://schemas.android.com/apk/res/android"
+    android:inset="-7.9158%">
+    <bitmap
+        android:src="@drawable/ic_easy_share_adaptive_foreground"
+        android:antialias="true"
+        android:filter="true"
+        android:gravity="fill" />
+</inset>

@@ -3,11 +3,14 @@ package me.pipi.easyshare.services
 import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.PendingIntent
+import android.graphics.drawable.Icon
 import android.content.BroadcastReceiver
+import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import android.net.Uri
 import android.net.wifi.p2p.WifiP2pConfig
 import android.net.wifi.p2p.WifiP2pDevice
 import android.net.wifi.p2p.WifiP2pDeviceList
@@ -16,6 +19,7 @@ import android.net.wifi.p2p.WifiP2pInfo
 import android.net.wifi.p2p.WifiP2pManager
 import android.os.Binder
 import android.util.Log
+import android.widget.Toast
 import androidx.annotation.DrawableRes
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
@@ -38,32 +42,41 @@ import io.ktor.websocket.CloseReason
 import io.ktor.websocket.close
 import io.ktor.websocket.readText
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.channels.ClosedReceiveChannelException
 import kotlinx.serialization.json.Json
 import me.pipi.easyshare.AppSettings
 import me.pipi.easyshare.BleSecurity
 import me.pipi.easyshare.BuildConfig
 import me.pipi.easyshare.MyApplication
 import me.pipi.easyshare.R
+import me.pipi.easyshare.ShareActivity
 import me.pipi.easyshare.SessionSecurity
 import me.pipi.easyshare.exceptions.CancelledByUserException
 import me.pipi.easyshare.exceptions.ExceptionWithMessage
 import me.pipi.easyshare.models.DeviceInfo
 import me.pipi.easyshare.models.P2pInfo
 import me.pipi.easyshare.models.TaskInfo
+import me.pipi.easyshare.models.OutgoingTransferPresentation
 import me.pipi.easyshare.models.TransferUiState
 import me.pipi.easyshare.models.TransferUiStatus
 import me.pipi.easyshare.models.WebSocketMessage
@@ -102,13 +115,65 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
+import java.io.IOException
 import kotlin.random.Random
+
+internal class UnconfirmedTransferException(cause: Throwable? = null) :
+    Exception("No reception result after local output completed", cause)
+
+internal suspend fun awaitOutgoingDownloadStart(
+    inlineText: Boolean,
+    transferStart: Deferred<Unit>,
+): Boolean {
+    // Inline text is already in sendRequest; accepting it never starts a ZIP download.
+    if (inlineText) return false
+    transferStart.awaitWithTimeout(
+        Duration.ofSeconds(30),
+        "Waiting for start transfer",
+        R.string.error_send_timeout_handshake,
+    )
+    return true
+}
+
+internal suspend fun awaitOutgoingOutcome(
+    localCompletion: Deferred<Unit>,
+    remoteStatus: Deferred<Pair<Int, String>>,
+    confirmationTimeoutMillis: Long = 30_000L,
+): RemoteTransferOutcome {
+    val status: Pair<Int, String> = try {
+        select<Pair<Int, String>> {
+            remoteStatus.onAwait { it }
+            localCompletion.onAwait {
+                withTimeoutOrNull(confirmationTimeoutMillis) { remoteStatus.await() }
+                    ?: throw UnconfirmedTransferException()
+            }
+        }
+    } catch (error: Exception) {
+        if (localCompletion.isCompleted && !localCompletion.isCancelled &&
+            (error is IOException || error is ClosedReceiveChannelException)) {
+            throw UnconfirmedTransferException(error)
+        }
+        throw error
+    }
+    val outcome = TransferStatusProtocol.classify(status.first, status.second)
+    // A peer's receipt cannot substitute for finishing our own output stream.
+    if (outcome == RemoteTransferOutcome.SUCCESS) localCompletion.await()
+    return outcome
+}
+
+internal fun outgoingFailureStatus(exception: Throwable?): TransferUiStatus = when {
+    exception is UnconfirmedTransferException -> TransferUiStatus.UNCONFIRMED
+    exception is CancelledByUserException ->
+        if (exception.isRemote) TransferUiStatus.REJECTED else TransferUiStatus.CANCELED
+    exception is TimeoutException ||
+        (exception is ExceptionWithMessage && exception.cause is TimeoutCancellationException) -> TransferUiStatus.TIMEOUT
+    else -> TransferUiStatus.FAILED
+}
 
 class P2pSenderService : BaseP2pService() {
     private val binder = LocalBinder()
     private val serviceJob = SupervisorJob()
     private val scope = CoroutineScope(Dispatchers.Main + serviceJob)
-    private var retainTransferNotification = false
 
     inner class LocalBinder : Binder() {
         fun getService(): P2pSenderService = this@P2pSenderService
@@ -118,15 +183,22 @@ class P2pSenderService : BaseP2pService() {
 
     @Volatile
     private var currentDeviceId: String? = null
+    private var transferNotificationId = 0
+    private var terminalNotificationStarted = false
+    private var retainTransferNotification = false
 
-    private fun updateStage(
-        taskId: Int,
-        targetName: String,
+    private suspend fun updateStage(
+        task: TaskInfo,
         stage: LiveStage,
         progress: Int = 0,
         currentFile: String? = null,
         partial: Boolean = false,
     ) {
+        val taskId = task.id
+        if (!TransferUiCoordinator.owns(taskId, task.device.id)) return
+        val currentStatus = TransferUiCoordinator.states.value[task.device.id]?.status
+        if (currentStatus != null && currentStatus != TransferUiStatus.WAITING &&
+            currentStatus != TransferUiStatus.SENDING) return
         val unconfirmedProgress = progress.coerceIn(0, 99)
         currentDeviceId?.let { deviceId ->
             val uiStatus = when (stage) {
@@ -141,7 +213,7 @@ class P2pSenderService : BaseP2pService() {
 
                 LiveStage.COMPLETED -> if (partial) TransferUiStatus.PARTIAL else TransferUiStatus.SUCCESS
             }
-            TransferUiCoordinator.publish(
+            val published = TransferUiCoordinator.publish(
                 TransferUiState(
                     taskId = taskId,
                     deviceId = deviceId,
@@ -151,103 +223,122 @@ class P2pSenderService : BaseP2pService() {
                         LiveStage.FINALIZING -> 99
                         LiveStage.COMPLETED -> 100
                         else -> 0
-                    }
+                    },
+                    stage = stage,
                 )
             )
+            if (!published && stage == LiveStage.COMPLETED &&
+                TransferUiCoordinator.isCancelRequested(taskId, deviceId)) {
+                throw CancelledByUserException(false)
+            }
+            if (!published) return
         }
+        if (stage == LiveStage.COMPLETED) return
 
         val cancelIntent = if (stage != LiveStage.COMPLETED) {
             PendingIntent.getBroadcast(
                 this, taskId,
                 Intent(ACTION_CANCEL_SENDING).apply {
+                    data = cancelIdentity(taskId, task.device.id)
                     putExtra("taskId", taskId)
+                    putExtra("deviceId", task.device.id)
                     setPackage(packageName)
                 },
                 PendingIntent.FLAG_IMMUTABLE
             )
         } else null
 
-        val content = when (stage) {
-            LiveStage.TRANSFERRING -> currentFile ?: getString(R.string.sending_files)
-            LiveStage.INIT -> getString(R.string.preparing_send)
-            LiveStage.PREPARING -> getString(R.string.preparing_send)
-            LiveStage.REQUESTED -> getString(R.string.response_waiting)
-            LiveStage.HANDSHAKE -> getString(R.string.noti_connecting)
-            LiveStage.WAITING_AUTH -> getString(R.string.auth_waiting)
-            LiveStage.FINALIZING -> getString(R.string.finishing_send)
-            LiveStage.COMPLETED -> getString(
+        val isText = task.files.singleOrNull()?.textContent != null
+        val attachmentSummary = if (isText) getString(R.string.shared_text) else {
+            resources.getQuantityString(R.plurals.incoming_transfer_multiple, task.files.size, task.files.size)
+        }
+        val content = stage.notificationContent(
+            currentFile,
+            attachmentSummary,
+            getString(
                 if (partial) R.string.noti_send_partial_body else R.string.noti_send_complete_body,
-            )
-        }
-
-        val displayProgress = if (stage == LiveStage.TRANSFERRING) {
-            40 + (unconfirmedProgress * 0.5).toInt()
-        } else {
-            stage.progress
-        }
+            ),
+        )
 
         val shortText = when (stage) {
             LiveStage.TRANSFERRING -> "$unconfirmedProgress%"
             LiveStage.INIT, LiveStage.PREPARING -> getString(R.string.stage_prep)
             LiveStage.HANDSHAKE -> getString(R.string.stage_conn)
             LiveStage.REQUESTED, LiveStage.WAITING_AUTH -> getString(R.string.stage_wait)
-            LiveStage.FINALIZING -> getString(R.string.stage_fin)
+            LiveStage.FINALIZING -> getString(R.string.stage_send_fin)
             LiveStage.COMPLETED -> getString(R.string.stage_done)
         }
 
         val state = LiveUpdateState(
-            title = getString(R.string.sending),
+            taskKey = NotificationUtils.taskKey("send", task.id),
+            title = getString(stage.titleResource(sending = true)),
             content = content,
-            subText = getString(R.string.outgoing_transfer_to, targetName),
-            progress = if (stage == LiveStage.TRANSFERRING || stage == LiveStage.FINALIZING) {
-                displayProgress
-            } else {
-                -1
-            },
+            subText = getString(R.string.outgoing_transfer_to, task.device.displayName),
+            peerBrandId = task.device.brandId,
+            stage = stage,
+            isText = isText,
+            progress = stage.notificationProgress(unconfirmedProgress),
+            indeterminate = stage.hasIndeterminateProgress(userInitiated = true),
             shortCriticalText = shortText,
             priority = LiveUpdatePriority.CRITICAL,
             ongoing = stage != LiveStage.COMPLETED,
+            promoted = stage.requestsPromotion(userInitiated = true),
             cancelIntent = cancelIntent,
+            contentIntent = taskContentIntent(task),
             channelId = NotificationUtils.SENDER_CHAN_ID,
             smallIcon = R.drawable.ic_arrow_circle_up
         )
 
-        LiveUpdateCoordinator.publishState("SENDER", state)
-        updateForeground()
+        withContext(Dispatchers.Main.immediate) {
+            if (!NotificationUtils.canPublishTransferNotification(taskId, currentTaskId, terminalNotificationStarted) ||
+                !TransferUiCoordinator.owns(taskId, task.device.id)) return@withContext
+            val latest = TransferUiCoordinator.states.value[task.device.id]
+            if (latest?.status != TransferUiStatus.WAITING && latest?.status != TransferUiStatus.SENDING) return@withContext
+            LiveUpdateCoordinator.publishState("SENDER", state)
+            updateForeground()
+        }
     }
 
     private fun updateForeground() {
         startForeground(
-            NotificationUtils.ID_TRANSFER,
+            transferNotificationId,
             NotificationUtils.getCurrentLiveNotification(this),
             ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
         )
     }
 
-    private fun showTransferResult(notification: Notification) {
-        // Replacing a promoted foreground notification in place can retain its
-        // stale ongoing flags on Android 17. Remove the live notification first.
-        stopForeground(android.app.Service.STOP_FOREGROUND_REMOVE)
-        notificationManager.cancel(NotificationUtils.ID_TRANSFER)
-        retainTransferNotification = try {
-            notificationManager.notify(NotificationUtils.ID_TRANSFER, notification)
-            true
-        } catch (e: SecurityException) {
-            Log.w(TAG, "Notification permission unavailable for send result", e)
-            false
+    private suspend fun showTransferResult(task: TaskInfo, notification: Notification) =
+        withContext(Dispatchers.Main.immediate + NonCancellable) {
+            if (currentTaskId != task.id || terminalNotificationStarted) return@withContext
+            terminalNotificationStarted = true
+            if (transferNotificationId == 0) return@withContext
+            retainTransferNotification = try {
+                // Progress and result must use the same AMS queue before detaching the FGS flag.
+                startForeground(transferNotificationId, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+                stopForeground(android.app.Service.STOP_FOREGROUND_DETACH)
+                true
+            } catch (e: SecurityException) {
+                Log.w(TAG, "Notification permission unavailable for send result", e)
+                false
+            } catch (e: Exception) {
+                Log.w(TAG, "Unable to show send result notification", e)
+                false
+            }
         }
-    }
 
     private fun removeTransferNotification() {
-        stopForeground(android.app.Service.STOP_FOREGROUND_REMOVE)
-        notificationManager.cancel(NotificationUtils.ID_TRANSFER)
-        retainTransferNotification = false
+        try {
+            stopForeground(android.app.Service.STOP_FOREGROUND_REMOVE)
+            if (transferNotificationId != 0) notificationManager.cancel(transferNotificationId)
+        } catch (e: Exception) {
+            Log.w(TAG, "Unable to remove live send notification", e)
+        }
     }
 
     @Volatile
     private var groupInfoFuture = CompletableDeferred<WifiP2pGroup>()
 
-    private suspend fun createP2pGroup(config: WifiP2pConfig) {
+    private suspend fun createP2pGroup(config: WifiP2pConfig): WifiP2pGroup {
         var lastFailure: Throwable? = null
 
         repeat(MAX_P2P_CREATE_ATTEMPTS) { index ->
@@ -256,12 +347,11 @@ class P2pSenderService : BaseP2pService() {
 
             try {
                 p2pManager.createGroupSuspend(p2pChannel, config)
-                groupInfoFuture.awaitWithTimeout(
+                return groupInfoFuture.awaitWithTimeout(
                     Duration.ofSeconds(5),
                     "Waiting for P2P group info",
                     R.string.error_p2p_failed,
                 )
-                return
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
@@ -279,7 +369,7 @@ class P2pSenderService : BaseP2pService() {
                 }
                 if (activeGroup != null) {
                     Log.i(TAG, "P2P group became available after attempt $attempt")
-                    return
+                    return activeGroup
                 }
 
                 if (attempt < MAX_P2P_CREATE_ATTEMPTS) {
@@ -294,6 +384,7 @@ class P2pSenderService : BaseP2pService() {
     private val currentTaskLock = Any()
     private var currentJob: Job? = null
     private var currentTaskId: Int? = null
+    private var currentStartId: Int? = null
 
     private lateinit var notificationManager: NotificationManagerCompat
     private var internalReceiverRegistered = false
@@ -302,7 +393,9 @@ class P2pSenderService : BaseP2pService() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
                 ACTION_CANCEL_SENDING -> {
-                    cancel(intent.getIntExtra("taskId", -1))
+                    intent.getStringExtra("deviceId")?.let { deviceId ->
+                        cancel(intent.getIntExtra("taskId", -1), deviceId)
+                    }
                 }
             }
         }
@@ -353,7 +446,7 @@ class P2pSenderService : BaseP2pService() {
     suspend fun runTask(task: TaskInfo): Boolean = coroutineScope {
         require(task.files.isNotEmpty()) { "No files to send" }
         val taskIdStr = task.id.toString()
-        updateStage(task.id, task.device.name, LiveStage.PREPARING)
+        updateStage(task, LiveStage.PREPARING)
         var totalSize = 0L
         var fileCount = 0
         var mimeType: String? = null
@@ -522,9 +615,8 @@ class P2pSenderService : BaseP2pService() {
                     )
                     send(Frame.Text(vnMsg.toText()))
                     versionNegotiationFuture.await()
-                    updateStage(task.id, task.device.name, LiveStage.HANDSHAKE)
-                    
                     val srMsg = WebSocketMessage("action", 1, "sendRequest", taskObj)
+                    updateStage(task, LiveStage.WAITING_AUTH)
                     send(Frame.Text(srMsg.toText()))
                     handshakeCompleteFuture.complete(Unit)
 
@@ -546,7 +638,7 @@ class P2pSenderService : BaseP2pService() {
                     if (BuildConfig.DEBUG) Log.d(TAG, "Authorized download connected")
                     transferActivityNanos.set(System.nanoTime())
                     transferStartFuture.complete(Unit)
-                    updateStage(task.id, task.device.name, LiveStage.TRANSFERRING)
+                    updateStage(task, LiveStage.TRANSFERRING)
 
                     var processedSize = 0L
                     var currentFileName: String? = null
@@ -557,8 +649,7 @@ class P2pSenderService : BaseP2pService() {
                             0
                         }
                         updateStage(
-                            task.id,
-                            task.device.name,
+                            task,
                             LiveStage.TRANSFERRING,
                             percent,
                             currentFileName,
@@ -667,9 +758,17 @@ class P2pSenderService : BaseP2pService() {
                 .build()
 
             try {
-                createP2pGroup(p2pConfig)
+                val group = createP2pGroup(p2pConfig)
 
-                val p2pMac = ShizukuUtils.getMacAddress(this@P2pSenderService, "p2p0") ?: "02:00:00:00:00:00"
+                // Native peers validate the P2P device identity, not the group's interface
+                // MAC/BSSID. Android redacts our identity without LOCAL_MAC_ADDRESS.
+                val p2pMac = DeviceUtils.usableP2pDeviceAddress(group.owner?.deviceAddress)
+                    ?: DeviceUtils.usableP2pDeviceAddress(
+                        ShizukuUtils.getP2pDeviceAddress(this@P2pSenderService),
+                    )
+                    ?: throw ExceptionWithMessage(
+                        "Missing P2P device address", IllegalStateException(), R.string.error_p2p_failed,
+                    )
                 if (BuildConfig.DEBUG) Log.d(TAG, "Resolved local P2P interface metadata")
 
                 withTimeoutReason(
@@ -748,18 +847,12 @@ class P2pSenderService : BaseP2pService() {
                         R.string.error_send_timeout_ws
                     )
 
-                    updateStage(task.id, task.device.name, LiveStage.HANDSHAKE)
-
                     handshakeCompleteFuture.awaitWithTimeout(
                         Duration.ofSeconds(5),
                         "Waiting for handshake",
                         R.string.error_send_timeout_handshake
                     )
-                    transferStartFuture.awaitWithTimeout(
-                        Duration.ofSeconds(30),
-                        "Waiting for start transfer",
-                        R.string.error_send_timeout_handshake
-                    )
+                    if (!awaitOutgoingDownloadStart(sharedTextContent != null, transferStartFuture)) return@async
                     val stallWatchdog = launch {
                         while (!transferCompleteFuture.isCompleted) {
                             delay(TRANSFER_STALL_POLL_MS)
@@ -779,36 +872,21 @@ class P2pSenderService : BaseP2pService() {
                     } finally {
                         stallWatchdog.cancel()
                     }
-                    updateStage(task.id, task.device.name, LiveStage.FINALIZING)
-                    statusFuture.awaitWithTimeout(
-                        Duration.ofSeconds(STATUS_CONFIRMATION_TIMEOUT_SECONDS),
-                        "Waiting for receive confirmation",
-                        R.string.error_send_timeout_confirmation,
-                    )
+                    updateStage(task, LiveStage.FINALIZING)
                 }
-                val status = select {
-                    statusFuture.onAwait { it }
-                    transferJob.onAwait { it }
-                }
-
-                when (TransferStatusProtocol.classify(status.first, status.second)) {
+                when (awaitOutgoingOutcome(transferJob, statusFuture)) {
                     RemoteTransferOutcome.REJECTED -> throw CancelledByUserException(true)
                     RemoteTransferOutcome.TIMED_OUT -> {
                         throw TimeoutException("Remote receive request timed out")
                     }
-                    RemoteTransferOutcome.SUCCESS,
+                    RemoteTransferOutcome.SUCCESS -> return@coroutineScope true
                     RemoteTransferOutcome.PARTIAL -> {
-                        delay(1000)
                         if (transferJob.isActive) transferJob.cancel()
-                        return@coroutineScope status.first == TransferStatusProtocol.TYPE_SUCCESS &&
-                            !status.second.equals(
-                                TransferStatusProtocol.REASON_PARTIAL,
-                                ignoreCase = true,
-                            )
+                        return@coroutineScope false
                     }
                     RemoteTransferOutcome.FAILED -> Unit
                 }
-                throw RuntimeException("Transfer terminated with $status")
+                throw RuntimeException("Transfer terminated by the receiver")
             } finally {
                 withContext(NonCancellable) {
                     try {
@@ -828,43 +906,57 @@ class P2pSenderService : BaseP2pService() {
     }
 
     @SuppressLint("MissingPermission")
+    @OptIn(ExperimentalCoroutinesApi::class)
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val alreadyRunning = synchronized(currentTaskLock) {
+            if (currentJob == null) false else {
+                // An ignored duplicate still advances the Service's last start ID.
+                currentStartId = startId
+                true
+            }
+        }
+        if (alreadyRunning) return START_NOT_STICKY
         if (intent == null) {
             stopSelf(startId)
             return START_NOT_STICKY
         }
 
-        if (!MyApplication.getInstance().setBusy()) {
-            Log.i(TAG, "Application is busy, skipping")
-            NotificationUtils.showBusyToast(this)
-            val hasActiveTask = synchronized(currentTaskLock) { currentJob?.isActive == true }
-            if (!hasActiveTask) stopSelf(startId)
-            return START_NOT_STICKY
-        }
-
         @Suppress("DEPRECATION")
         val task = intent.getParcelableExtra<TaskInfo>("task") ?: run {
-            MyApplication.getInstance().clearBusy()
             stopSelf(startId)
+            return START_NOT_STICKY
+        }
+        if (!TransferUiCoordinator.owns(task.id, task.device.id)) {
+            if (synchronized(currentTaskLock) { currentJob == null }) stopSelf(startId)
             return START_NOT_STICKY
         }
 
         currentDeviceId = task.device.id
+        transferNotificationId = 0
+        terminalNotificationStarted = false
         retainTransferNotification = false
 
-        val job = scope.launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
+        // Every admitted task must enter cleanup, even if canceled before IO dispatch.
+        val job = scope.launch(Dispatchers.IO, start = CoroutineStart.ATOMIC) {
             try {
-                updateStage(task.id, task.device.name, LiveStage.PREPARING)
+                withContext(Dispatchers.Main) {
+                    transferNotificationId = NotificationUtils.newTransferNotificationId(this@P2pSenderService)
+                }
+                if (TransferUiCoordinator.isCancelRequested(task.id, task.device.id)) {
+                    throw CancelledByUserException(false)
+                }
+                currentCoroutineContext().ensureActive()
+                updateStage(task, LiveStage.PREPARING)
                 val completedFully = runTask(task)
                 updateStage(
-                    task.id,
-                    task.device.name,
+                    task,
                     LiveStage.COMPLETED,
                     partial = !completedFully,
                 )
                 showTransferResult(
+                    task,
                     createCompletedNotification(
-                        targetName = task.device.name,
+                        task = task,
                         partial = !completedFully,
                         textShared = task.files.size == 1 && task.files.first().textContent != null,
                     ),
@@ -875,96 +967,124 @@ class P2pSenderService : BaseP2pService() {
                     TransferUiState(
                         taskId = task.id,
                         deviceId = task.device.id,
-                        status = if (e.isRemote) TransferUiStatus.REJECTED else TransferUiStatus.CANCELED
+                        status = outgoingFailureStatus(e)
                     )
                 )
-                if (e.isRemote) {
-                    showTransferResult(createFailedNotification(task.device.name, e))
-                } else {
-                    removeTransferNotification()
-                }
+                showTransferResult(task, createFailedNotification(task, e))
             } catch (e: CancellationException) {
                 Log.i(TAG, "Sending coroutine stopped", e)
+                TransferUiCoordinator.publish(TransferUiState(task.id, task.device.id,
+                    TransferUiStatus.FAILED, errorMessage = getString(R.string.noti_send_interrupted)))
+                showTransferResult(task, createFailedNotification(task, e))
             } catch (e: Throwable) {
                 Log.e(TAG, "Failed to process task", e)
-                if (!retainTransferNotification) {
+                val currentStatus = TransferUiCoordinator.states.value[task.device.id]?.status
+                if (currentStatus == TransferUiStatus.WAITING || currentStatus == TransferUiStatus.SENDING) {
                     TransferUiCoordinator.publish(
                         TransferUiState(
                             taskId = task.id,
                             deviceId = task.device.id,
-                            status = if (e is TimeoutException) TransferUiStatus.TIMEOUT else TransferUiStatus.FAILED
+                            status = outgoingFailureStatus(e),
+                            errorMessage = if (e is ExceptionWithMessage) e.getMessage(this@P2pSenderService)
+                                else if (e is UnconfirmedTransferException) getString(R.string.error_send_timeout_confirmation)
+                                else if (outgoingFailureStatus(e) == TransferUiStatus.TIMEOUT) getString(R.string.device_status_timeout)
+                                else getString(R.string.noti_send_interrupted),
                         )
                     )
-                    showTransferResult(createFailedNotification(task.device.name, e))
+                    showTransferResult(task, createFailedNotification(task, e))
                 }
             } finally {
-                LiveUpdateCoordinator.clearState("SENDER")
-                MyApplication.getInstance().clearBusy()
-
-                if (!retainTransferNotification) {
-                    removeTransferNotification()
+                withContext(NonCancellable + Dispatchers.Main) {
+                    synchronized(currentTaskLock) {
+                        if (currentTaskId == task.id && currentDeviceId == task.device.id) {
+                            val endingStartId = currentStartId ?: startId
+                            try {
+                                LiveUpdateCoordinator.clearState("SENDER")
+                                if (!retainTransferNotification) removeTransferNotification()
+                                NotificationUtils.releaseTask("send", task.id)
+                            } finally {
+                                currentTaskId = null
+                                currentStartId = null
+                                currentJob = null
+                                currentDeviceId = null
+                                TransferUiCoordinator.finish(task.id, task.device.id)
+                                stopSelf(endingStartId)
+                                MyApplication.getInstance().clearBusy()
+                            }
+                        }
+                    }
                 }
-
-                synchronized(currentTaskLock) {
-                    currentTaskId = null
-                    currentJob = null
-                    currentDeviceId = null
-                }
-                stopSelf()
             }
         }
 
         synchronized(currentTaskLock) {
             currentTaskId = task.id
+            currentStartId = startId
             currentJob = job
         }
-        job.start()
-
         return START_NOT_STICKY
     }
 
-    fun cancel(taskId: Int) {
+    fun cancel(taskId: Int, deviceId: String) {
         synchronized(currentTaskLock) {
-            if (currentTaskId == taskId) {
+            if (currentTaskId == taskId && currentDeviceId == deviceId &&
+                TransferUiCoordinator.requestCancel(taskId, deviceId)) {
                 currentJob?.cancel(CancelledByUserException(false))
             }
         }
     }
 
-    private fun createNotificationBuilder(@DrawableRes icon: Int): NotificationCompat.Builder {
+    private fun taskContentIntent(task: TaskInfo): PendingIntent = PendingIntent.getActivity(
+        this,
+        task.id,
+        ShareActivity.createTransferIntent(this, task),
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+    )
+
+    private fun createNotificationBuilder(task: TaskInfo, @DrawableRes icon: Int): NotificationCompat.Builder {
         return NotificationCompat.Builder(this, NotificationUtils.SENDER_CHAN_ID)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .setSmallIcon(icon)
-            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setLargeIcon(Icon.createWithResource(this, DeviceUtils.deviceIconById(task.device.brandId)))
+            .setContentIntent(taskContentIntent(task))
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setOnlyAlertOnce(true)
+            .setSilent(true)
+            .setOngoing(false)
+            .setRequestPromotedOngoing(false)
     }
 
-    private fun createFailedNotification(targetName: String, exception: Throwable?): Notification {
-        return createNotificationBuilder(R.drawable.ic_warning)
-            .setContentTitle(getString(R.string.send_fail))
-            .setSubText(targetName)
-            .setContentText(
-                when (exception) {
-                    is ExceptionWithMessage -> exception.getMessage(this)
-                    is CancelledByUserException -> if (exception.isRemote) {
-                        getString(R.string.cancelled_by_user_remote)
-                    } else {
-                        getString(R.string.cancelled_by_user_local)
-                    }
-                    else -> getString(R.string.noti_send_interrupted)
-                }
-            )
+    private fun createFailedNotification(task: TaskInfo, exception: Throwable?): Notification {
+        val content = when (exception) {
+            is UnconfirmedTransferException -> getString(R.string.error_send_timeout_confirmation)
+            is ExceptionWithMessage -> exception.getMessage(this)
+            is CancelledByUserException -> if (exception.isRemote) {
+                getString(R.string.device_status_rejected)
+            } else {
+                getString(R.string.cancelled_by_user_local)
+            }
+            else -> getString(if (outgoingFailureStatus(exception) == TransferUiStatus.TIMEOUT)
+                R.string.device_status_timeout else R.string.noti_send_interrupted)
+        }
+        return createNotificationBuilder(task, R.drawable.ic_warning)
+            .setContentTitle(getString(me.pipi.easyshare.outgoingTransferTitle(
+                TransferUiState(task.id, task.device.id, outgoingFailureStatus(exception)),
+            )))
+            .setSubText(task.device.displayName)
+            .setContentText(content)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(content))
             .setAutoCancel(true)
             .build()
     }
 
     private fun createCompletedNotification(
-        targetName: String,
+        task: TaskInfo,
         partial: Boolean,
         textShared: Boolean,
     ) =
-        createNotificationBuilder(R.drawable.ic_arrow_circle_up)
+        createNotificationBuilder(task, R.drawable.ic_arrow_circle_up)
             .setContentTitle(getString(if (partial) R.string.send_partial else R.string.send_ok))
-            .setSubText(targetName)
+            .setSubText(task.device.displayName)
             .setContentText(
                 getString(
                     when {
@@ -986,7 +1106,6 @@ class P2pSenderService : BaseP2pService() {
             }
             internalReceiverRegistered = false
         }
-        LiveUpdateCoordinator.clearState("SENDER")
         scope.cancel()
         super.onDestroy()
     }
@@ -998,7 +1117,6 @@ class P2pSenderService : BaseP2pService() {
         private const val TRANSFER_STALL_POLL_MS = 1_000L
         private const val TRANSFER_STALL_TIMEOUT_MS = 120_000L
         private const val TRANSFER_BUFFER_BYTES = 64 * 1024
-        private const val STATUS_CONFIRMATION_TIMEOUT_SECONDS = 30L
         private const val MAX_WEBSOCKET_FRAME_BYTES = 3L * 1024 * 1024
 
         val TAG: String = P2pSenderService::class.java.simpleName
@@ -1008,30 +1126,53 @@ class P2pSenderService : BaseP2pService() {
         fun getIntent(context: Context, task: TaskInfo): Intent {
             return Intent(context, P2pSenderService::class.java).apply {
                 putExtra("task", task)
+                val uris = task.files.filter { it.textContent == null && it.uri != Uri.EMPTY }
+                    .map { it.uri }.distinct()
+                if (uris.isNotEmpty()) {
+                    clipData = ClipData.newRawUri("shared files", uris.first()).apply {
+                        uris.drop(1).forEach { addItem(ClipData.Item(it)) }
+                    }
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
             }
         }
 
         fun startTaskChecked(context: Context, task: TaskInfo): Boolean {
-            if (MyApplication.getInstance().getBusy()) {
+            val presentation = OutgoingTransferPresentation.from(task)
+            if (!MyApplication.getInstance().setBusy()) {
                 NotificationUtils.showBusyToast(context)
                 return false
             }
-            TransferUiCoordinator.clear()
-            TransferUiCoordinator.publish(
-                TransferUiState(
-                    taskId = task.id,
-                    deviceId = task.device.id,
-                    status = TransferUiStatus.WAITING
-                )
-            )
-            context.startService(getIntent(context, task))
-            return true
+            if (!TransferUiCoordinator.begin(presentation)) {
+                MyApplication.getInstance().clearBusy()
+                NotificationUtils.showBusyToast(context)
+                return false
+            }
+            return try {
+                checkNotNull(context.startService(getIntent(context, task)))
+                true
+            } catch (error: Exception) {
+                Log.e(TAG, "Failed to start sending service", error)
+                TransferUiCoordinator.publish(TransferUiState(task.id, task.device.id,
+                    TransferUiStatus.FAILED, errorMessage = context.getString(R.string.noti_send_interrupted)))
+                TransferUiCoordinator.finish(task.id, task.device.id)
+                MyApplication.getInstance().clearBusy()
+                Toast.makeText(context, R.string.noti_send_interrupted, Toast.LENGTH_SHORT).show()
+                false
+            }
         }
 
-        fun cancelTask(context: Context, taskId: Int) {
+        private fun cancelIdentity(taskId: Int, deviceId: String): Uri =
+            Uri.Builder().scheme("easyshare").authority("cancel-sending")
+                .appendPath(deviceId).appendPath(taskId.toString()).build()
+
+        fun cancelTask(context: Context, taskId: Int, deviceId: String) {
+            if (!TransferUiCoordinator.requestCancel(taskId, deviceId)) return
             context.sendBroadcast(
                 Intent(ACTION_CANCEL_SENDING).apply {
+                    data = cancelIdentity(taskId, deviceId)
                     putExtra("taskId", taskId)
+                    putExtra("deviceId", deviceId)
                     setPackage(context.packageName)
                 },
                 me.pipi.easyshare.utils.INTERNAL_BROADCAST_PERMISSION,

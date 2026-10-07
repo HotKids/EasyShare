@@ -4,13 +4,17 @@ import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
+import android.content.ComponentName
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.graphics.drawable.Icon
 import android.net.Uri
 import android.net.wifi.p2p.WifiP2pConfig
 import android.net.wifi.p2p.WifiP2pGroup
@@ -22,6 +26,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.StatFs
+import android.os.SystemClock
 import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.text.format.Formatter
@@ -31,7 +36,6 @@ import android.widget.Toast
 import androidx.annotation.DrawableRes
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
-import androidx.core.net.toUri
 import androidx.documentfile.provider.DocumentFile
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
@@ -48,16 +52,20 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.ClosedReceiveChannelException
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.selects.select
-import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.withContext
 import me.pipi.easyshare.AppSettings
 import me.pipi.easyshare.BuildConfig
 import me.pipi.easyshare.IncomingTransferActivity
@@ -79,16 +87,18 @@ import me.pipi.easyshare.utils.BleUtils
 import me.pipi.easyshare.utils.ArchiveEntryNames
 import me.pipi.easyshare.utils.ArchiveReceiveRecovery
 import me.pipi.easyshare.utils.LiveStage
+import me.pipi.easyshare.utils.IncomingPeerIdentity
 import me.pipi.easyshare.utils.LiveUpdateCoordinator
 import me.pipi.easyshare.utils.IncomingTransferUiCoordinator
+import me.pipi.easyshare.utils.IncomingRequestDecision
 import me.pipi.easyshare.utils.NotificationUtils
 import me.pipi.easyshare.utils.ProgressCounter
 import me.pipi.easyshare.utils.TAG
 import me.pipi.easyshare.utils.TransferLimitException
 import me.pipi.easyshare.utils.TransferLimits
+import me.pipi.easyshare.utils.ReceivedFilesSnapshot
 import me.pipi.easyshare.utils.TransferStatusProtocol
 import me.pipi.easyshare.utils.ZipPathValidatorCallback
-import me.pipi.easyshare.utils.awaitP2pNetwork
 import me.pipi.easyshare.utils.awaitWithTimeout
 import me.pipi.easyshare.utils.checkP2pPermissions
 import me.pipi.easyshare.utils.connectSuspend
@@ -107,32 +117,34 @@ import java.util.concurrent.TimeUnit
 import java.util.zip.ZipException
 import java.util.zip.ZipInputStream
 import javax.net.ssl.SSLContext
-import javax.net.SocketFactory
 import kotlin.math.min
 import kotlin.random.Random
 
 class P2pReceiverService : BaseP2pService() {
-    private enum class IncomingRequestDecision {
-        ACCEPTED,
-        REJECTED,
-        TIMED_OUT,
-    }
-
     private lateinit var notificationManager: NotificationManagerCompat
     private val serviceJob = SupervisorJob()
     private val scope = CoroutineScope(Dispatchers.Main + serviceJob)
     private var retainTransferNotification = false
+    private var transferNotificationId = 0
+    private var terminalNotificationStarted = false
+    private var taskNotificationJob: Job? = null
 
-    private fun updateStage(
+    private suspend fun updateStage(
         taskId: Int,
         senderName: String,
         stage: LiveStage,
         progress: Int = 0,
         currentFile: String? = null,
         contentOverride: String? = null,
-        contentIntent: PendingIntent? = null,
+        contentIntent: PendingIntent?,
+        requestAccepted: Boolean = false,
+        alertUser: Boolean = false,
+        peerBrandId: Int? = null,
     ) {
-        val cancelIntent = if (stage != LiveStage.COMPLETED) {
+        val presentation = IncomingTransferUiCoordinator.get(taskId)
+        val cancelIntent = if (presentation?.cancelRequested != true &&
+            stage != LiveStage.COMPLETED && stage != LiveStage.WAITING_AUTH &&
+            SystemClock.elapsedRealtime() >= (presentation?.cancelEnabledAtMillis ?: 0L)) {
             PendingIntent.getBroadcast(
                 this, taskId,
                 Intent(ACTION_CANCEL_RECEIVING).apply {
@@ -143,30 +155,22 @@ class P2pReceiverService : BaseP2pService() {
             )
         } else null
 
-        val title = when (stage) {
-            LiveStage.COMPLETED -> getString(R.string.recv_ok)
-            else -> getString(R.string.receiving)
-        }
+        val title = getString(stage.titleResource(sending = false))
 
-        val content = contentOverride ?: when (stage) {
-            LiveStage.TRANSFERRING -> currentFile ?: getString(R.string.receiving_files)
-            LiveStage.INIT -> getString(R.string.preparing_receive)
-            LiveStage.PREPARING -> getString(R.string.preparing_receive)
-            LiveStage.REQUESTED -> getString(R.string.response_waiting)
-            LiveStage.HANDSHAKE -> getString(R.string.noti_connecting)
-            LiveStage.WAITING_AUTH -> getString(R.string.auth_waiting)
-            LiveStage.FINALIZING -> getString(R.string.finishing_receive)
-            LiveStage.COMPLETED -> getString(R.string.noti_receive_complete_body)
-        }
+        val attachmentSummary = presentation?.let {
+            if (it.isText) getString(R.string.shared_text) else {
+                resources.getQuantityString(R.plurals.incoming_transfer_multiple, it.fileCount, it.fileCount)
+            }
+        }.orEmpty()
+        val content = contentOverride ?: stage.notificationContent(
+            currentFile,
+            attachmentSummary,
+            getString(R.string.noti_receive_complete_body),
+        )
 
-        val displayProgress = if (stage == LiveStage.TRANSFERRING) {
-            40 + (progress * 0.5).toInt()
-        } else {
-            stage.progress
-        }
-
+        val unconfirmedProgress = progress.coerceIn(0, 99)
         val shortText = when (stage) {
-            LiveStage.TRANSFERRING -> "$progress%"
+            LiveStage.TRANSFERRING -> "$unconfirmedProgress%"
             LiveStage.INIT, LiveStage.PREPARING -> getString(R.string.stage_prep)
             LiveStage.HANDSHAKE -> getString(R.string.stage_conn)
             LiveStage.REQUESTED, LiveStage.WAITING_AUTH -> getString(R.string.stage_wait)
@@ -178,20 +182,22 @@ class P2pReceiverService : BaseP2pService() {
             title = title,
             content = content,
             subText = getString(R.string.incoming_transfer_from, senderName),
-            progress = if (stage != LiveStage.COMPLETED) displayProgress else -1,
+            peerBrandId = presentation?.brandId ?: peerBrandId,
+            stage = stage,
+            isText = presentation?.isText == true,
+            progress = if (requestAccepted) stage.notificationProgress(unconfirmedProgress) else -1,
+            indeterminate = stage.hasIndeterminateProgress(userInitiated = requestAccepted),
             shortCriticalText = shortText,
             priority = LiveUpdatePriority.CRITICAL,
             ongoing = stage != LiveStage.COMPLETED,
+            promoted = stage.requestsPromotion(userInitiated = requestAccepted),
+            taskKey = NotificationUtils.taskKey("receive", taskId),
             cancelIntent = cancelIntent,
-            cancelLabel = if (stage == LiveStage.WAITING_AUTH) getString(R.string.ignore) else null,
             acceptIntent = if (stage == LiveStage.WAITING_AUTH) {
                 PendingIntent.getBroadcast(
                     this, taskId,
-                    Intent(ACTION_ACCEPTED).apply {
-                        putExtra("taskId", taskId)
-                        setPackage(packageName)
-                    },
-                    PendingIntent.FLAG_IMMUTABLE
+                    getResponseIntent(this, taskId, accepted = true),
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
                 )
             } else null,
             rejectIntent = if (stage == LiveStage.WAITING_AUTH) {
@@ -204,42 +210,99 @@ class P2pReceiverService : BaseP2pService() {
                     PendingIntent.FLAG_IMMUTABLE
                 )
             } else null,
-            contentIntent = contentIntent,
+            contentIntent = if (presentation?.isText == true) viewerPendingIntent(presentation) else contentIntent,
             channelId = NotificationUtils.RECEIVER_CHAN_ID,
             smallIcon = R.drawable.ic_arrow_circle_down,
-            silent = stage != LiveStage.WAITING_AUTH,
-            alertOnlyOnce = stage != LiveStage.WAITING_AUTH,
+            silent = !alertUser,
+            alertOnlyOnce = !alertUser,
         )
-
-        LiveUpdateCoordinator.publishState("RECEIVER", state)
-        updateForeground()
+        withContext(Dispatchers.Main.immediate) {
+            if (!NotificationUtils.canPublishTransferNotification(taskId, currentTaskId, terminalNotificationStarted)) return@withContext
+            val latest = IncomingTransferUiCoordinator.get(taskId)
+            if (latest != null && latest.status != IncomingTransferUiStatus.REQUESTED &&
+                latest.status != IncomingTransferUiStatus.RECEIVING) return@withContext
+            LiveUpdateCoordinator.publishState("RECEIVER", state)
+            updateForeground()
+        }
     }
 
     private fun updateForeground() {
         startForeground(
-            NotificationUtils.ID_TRANSFER,
+            transferNotificationId,
             NotificationUtils.getCurrentLiveNotification(this),
             ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
         )
     }
 
-    private fun showTransferResult(notification: Notification) {
-        // Replacing a promoted foreground notification in place can retain its
-        // stale ongoing flags on Android 17. Remove the live notification first.
-        stopForeground(android.app.Service.STOP_FOREGROUND_REMOVE)
-        notificationManager.cancel(NotificationUtils.ID_TRANSFER)
+    private fun viewerPendingIntent(state: IncomingTransferUiState, manualResult: Boolean = false): PendingIntent =
+        PendingIntent.getActivity(
+            this, state.taskId,
+            IncomingTransferActivity.createIntent(this, state, manualResult = manualResult),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+
+    private fun receiveDirectoryPendingIntent(taskId: Int, customDir: DocumentFile?): PendingIntent {
+        return PendingIntent.getActivity(
+            this, taskId, receivedDirectoryIntent(this, customDir),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+    }
+
+    private suspend fun observeRequest(taskId: Int, requestSummary: String, contentIntent: PendingIntent?) {
+        taskNotificationJob?.cancel()
+        taskNotificationJob = CoroutineScope(currentCoroutineContext()).launch(Dispatchers.Main.immediate) {
+            var guardJob: Job? = null
+            suspend fun display(state: IncomingTransferUiState) {
+                when (state.status) {
+                    IncomingTransferUiStatus.REQUESTED -> updateStage(
+                        taskId, state.senderName, LiveStage.WAITING_AUTH,
+                        contentOverride = requestSummary, contentIntent = contentIntent,
+                        alertUser = IncomingTransferUiCoordinator.takeRequestAlert(taskId),
+                    )
+                    IncomingTransferUiStatus.RECEIVING -> updateStage(
+                        taskId, state.senderName, state.stage, state.progress, state.currentFileName,
+                        contentIntent = contentIntent, requestAccepted = true,
+                    )
+                    else -> Unit
+                }
+            }
+            IncomingTransferUiCoordinator.states.map { it[taskId] }.distinctUntilChanged().collect { state ->
+                guardJob?.cancel()
+                if (state == null) return@collect
+                display(state)
+                val guardRemaining = state.cancelEnabledAtMillis - SystemClock.elapsedRealtime()
+                if (state.status == IncomingTransferUiStatus.RECEIVING && guardRemaining > 0L) {
+                    guardJob = launch {
+                        delay(guardRemaining)
+                        IncomingTransferUiCoordinator.get(taskId)?.let { display(it) }
+                    }
+                }
+            }
+        }
+    }
+
+    private suspend fun showTransferResult(taskId: Int, notification: Notification) = withContext(Dispatchers.Main + NonCancellable) {
+        if (currentTaskId != taskId || terminalNotificationStarted) return@withContext
+        terminalNotificationStarted = true
+        taskNotificationJob?.cancel()
+        if (transferNotificationId == 0) return@withContext
         retainTransferNotification = try {
-            notificationManager.notify(NotificationUtils.ID_TRANSFER, notification)
+            // Progress and result must use the same AMS queue before detaching the FGS flag.
+            startForeground(transferNotificationId, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+            stopForeground(android.app.Service.STOP_FOREGROUND_DETACH)
             true
         } catch (e: SecurityException) {
             Log.w(TAG, "Notification permission unavailable for receive result", e)
+            false
+        } catch (e: Exception) {
+            Log.w(TAG, "Unable to show receive result notification", e)
             false
         }
     }
 
     private fun removeTransferNotification() {
         stopForeground(android.app.Service.STOP_FOREGROUND_REMOVE)
-        notificationManager.cancel(NotificationUtils.ID_TRANSFER)
+        if (transferNotificationId != 0) notificationManager.cancel(transferNotificationId)
         retainTransferNotification = false
     }
 
@@ -256,6 +319,15 @@ class P2pReceiverService : BaseP2pService() {
                 ACTION_CANCEL_RECEIVING -> {
                     cancel(intent.getIntExtra("taskId", -1))
                 }
+                ACTION_ACCEPTED -> IncomingTransferUiCoordinator.decide(
+                    intent.getIntExtra("taskId", -1), IncomingRequestDecision.ACCEPTED,
+                )
+                ACTION_DISMISSED -> IncomingTransferUiCoordinator.decide(
+                    intent.getIntExtra("taskId", -1), IncomingRequestDecision.REJECTED,
+                )
+                ACTION_TIMED_OUT -> IncomingTransferUiCoordinator.decide(
+                    intent.getIntExtra("taskId", -1), IncomingRequestDecision.TIMED_OUT,
+                )
             }
         }
     }
@@ -272,7 +344,12 @@ class P2pReceiverService : BaseP2pService() {
             return
         }
 
-        registerInternalBroadcastReceiver(internalReceiver, IntentFilter(ACTION_CANCEL_RECEIVING))
+        registerInternalBroadcastReceiver(internalReceiver, IntentFilter().apply {
+            addAction(ACTION_CANCEL_RECEIVING)
+            addAction(ACTION_ACCEPTED)
+            addAction(ACTION_DISMISSED)
+            addAction(ACTION_TIMED_OUT)
+        })
         internalReceiverRegistered = true
     }
 
@@ -302,6 +379,7 @@ class P2pReceiverService : BaseP2pService() {
     private val currentTaskLock = Any()
     private var currentJob: Job? = null
     private var currentTaskId: Int? = null
+    private var currentStartId: Int = 0
 
     override fun onBind(intent: Intent): IBinder? {
         return null
@@ -323,7 +401,9 @@ class P2pReceiverService : BaseP2pService() {
         if (!MyApplication.getInstance().setBusy()) {
             Log.i(TAG, "Application is busy, skipping")
             NotificationUtils.showBusyToast(this)
-            val hasActiveTask = synchronized(currentTaskLock) { currentJob?.isActive == true }
+            val hasActiveTask = synchronized(currentTaskLock) {
+                (currentTaskId != null).also { if (it) currentStartId = startId }
+            }
             if (!hasActiveTask) stopSelf(startId)
             return START_NOT_STICKY
         }
@@ -346,22 +426,33 @@ class P2pReceiverService : BaseP2pService() {
 
         val localTaskId = Random.nextInt()
         retainTransferNotification = false
-        IncomingTransferUiCoordinator.clearAll()
-        val job = scope.launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
+        transferNotificationId = 0
+        terminalNotificationStarted = false
+        val peerAddress = intent.getStringExtra(IncomingPeerIdentity.EXTRA_GATT_PEER_ADDRESS)
+        val job = scope.launch(Dispatchers.IO, start = CoroutineStart.ATOMIC) {
+            var directoryContentIntent: PendingIntent? = null
+            var peerBrandId: Int? = null
             try {
-                updateStage(localTaskId, getString(R.string.device), LiveStage.INIT)
-                runReceive(info, localTaskId)
+                withContext(Dispatchers.Main) {
+                    transferNotificationId = NotificationUtils.newTransferNotificationId(this@P2pReceiverService)
+                }
+                updateStage(localTaskId, getString(R.string.device), LiveStage.INIT, contentIntent = null)
+                val customDir = getCustomDownloadDir()
+                directoryContentIntent = receiveDirectoryPendingIntent(localTaskId, customDir)
+                runReceive(info, localTaskId, customDir, directoryContentIntent, peerAddress) {
+                    peerBrandId = it
+                }
             } catch (e: CancelledByUserException) {
                 Log.i(TAG, "Cancelled by user")
-                if (e.isRemote) {
+                if (!hasCompletedResult(localTaskId)) {
                     IncomingTransferUiCoordinator.fail(
                         localTaskId,
-                        getString(R.string.cancelled_by_user_remote),
+                        getString(if (e.isRemote) R.string.cancelled_by_user_remote else R.string.cancelled_by_user_local),
                         canceled = true,
                     )
-                    showTransferResult(createFailedNotification(e))
-                } else {
-                    removeTransferNotification()
+                    withContext(NonCancellable) {
+                        showTransferResult(localTaskId, createFailedNotification(localTaskId, e, directoryContentIntent, peerBrandId))
+                    }
                 }
             } catch (e: CancellationException) {
                 Log.i(TAG, "Receiving coroutine stopped", e)
@@ -369,8 +460,13 @@ class P2pReceiverService : BaseP2pService() {
                     localTaskId,
                     getString(R.string.noti_recv_interrupted),
                 )
+                if (IncomingTransferUiCoordinator.get(localTaskId)?.status == IncomingTransferUiStatus.FAILED) {
+                    withContext(NonCancellable) {
+                        showTransferResult(localTaskId, createFailedNotification(localTaskId, e, directoryContentIntent, peerBrandId))
+                    }
+                }
             } catch (e: Throwable) {
-                if (isExpectedCompletedSessionClose(e)) {
+                if (hasCompletedResult(localTaskId) || isExpectedCompletedSessionClose(e)) {
                     Log.i(TAG, "Peer closed session after receive completed")
                 } else {
                     Log.e(TAG, "Failed to process task", e)
@@ -383,30 +479,37 @@ class P2pReceiverService : BaseP2pService() {
                                 getString(R.string.noti_recv_interrupted)
                             },
                         )
-                        showTransferResult(createFailedNotification(e))
+                        showTransferResult(localTaskId, createFailedNotification(localTaskId, e, directoryContentIntent, peerBrandId))
                     }
                 }
             } finally {
-                LiveUpdateCoordinator.clearState("RECEIVER")
-                MyApplication.getInstance().clearBusy()
-
-                if (!retainTransferNotification) {
-                    removeTransferNotification()
+                withContext(Dispatchers.Main + NonCancellable) {
+                    taskNotificationJob?.cancel()
+                    taskNotificationJob = null
+                    IncomingTransferUiCoordinator.releaseDecision(localTaskId)
+                    NotificationUtils.releaseTask("receive", localTaskId)
+                    synchronized(currentTaskLock) {
+                        if (currentTaskId == localTaskId) {
+                            try {
+                                LiveUpdateCoordinator.clearState("RECEIVER")
+                                if (!retainTransferNotification) removeTransferNotification()
+                            } finally {
+                                currentTaskId = null
+                                currentJob = null
+                                MyApplication.getInstance().clearBusy()
+                                stopSelf(currentStartId)
+                            }
+                        }
+                    }
                 }
-                
-                synchronized(currentTaskLock) {
-                    currentTaskId = null
-                    currentJob = null
-                }
-                stopSelf()
             }
         }
 
         synchronized(currentTaskLock) {
             currentTaskId = localTaskId
             currentJob = job
+            currentStartId = startId
         }
-        job.start()
 
 
         return START_NOT_STICKY
@@ -422,14 +525,14 @@ class P2pReceiverService : BaseP2pService() {
             put(MediaStore.Downloads.DISPLAY_NAME, file.name)
             put(MediaStore.Downloads.MIME_TYPE, mimeType ?: "application/octet-stream")
             put(
-                MediaStore.Downloads.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/Easy Share"
+                MediaStore.Downloads.RELATIVE_PATH, DEFAULT_DOWNLOAD_RELATIVE_PATH
             )
             put(MediaStore.Downloads.IS_PENDING, 1)
         }
     }
 
-    private fun ensureReceiveStorage(declaredSize: Long) {
-        if (getCustomDownloadDir() != null) return
+    private fun ensureReceiveStorage(declaredSize: Long, customDir: DocumentFile?) {
+        if (customDir != null) return
         val downloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
         val available = StatFs(downloads.absolutePath).availableBytes
         if (available < TransferLimits.requiredAvailableBytes(declaredSize)) {
@@ -437,79 +540,105 @@ class P2pReceiverService : BaseP2pService() {
         }
     }
 
-    private fun createNotificationBuilder(@DrawableRes icon: Int): NotificationCompat.Builder {
+    private fun createNotificationBuilder(
+        @DrawableRes icon: Int, contentIntent: PendingIntent?, peerBrandId: Int?,
+    ): NotificationCompat.Builder {
         return NotificationCompat.Builder(this, NotificationUtils.RECEIVER_CHAN_ID)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
-            .setSmallIcon(icon).setPriority(NotificationCompat.PRIORITY_MAX)
+            .setSmallIcon(icon)
+            .setLargeIcon(Icon.createWithResource(this, DeviceUtils.deviceIconById(peerBrandId)))
+            .setContentIntent(contentIntent)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setOnlyAlertOnce(true)
+            .setSilent(true)
+            .setOngoing(false)
+            .setRequestPromotedOngoing(false)
     }
 
     private fun createCompletedNotification(
-        senderName: String, receivedFiles: List<ReceivedFile>, isPartial: Boolean
+        taskId: Int, senderName: String, receivedFiles: List<ReceivedFile>, isPartial: Boolean,
+        contentIntent: PendingIntent?,
     ): Notification {
+        val content = if (receivedFiles.isEmpty()) {
+            getString(R.string.msg_copied_to_clipboard)
+        } else if (isPartial) {
+            resources.getQuantityString(
+                R.plurals.noti_complete_partial, receivedFiles.size, receivedFiles.size
+            )
+        } else {
+            resources.getQuantityString(
+                R.plurals.noti_complete, receivedFiles.size, receivedFiles.size
+            )
+        }
         val builder =
-            createNotificationBuilder(R.drawable.ic_arrow_circle_down)
+            createNotificationBuilder(R.drawable.ic_arrow_circle_down, contentIntent,
+                IncomingTransferUiCoordinator.get(taskId)?.brandId)
                 .setContentTitle(getString(if (isPartial) R.string.recv_partial else R.string.recv_ok))
-                .setSubText(senderName).setAutoCancel(true).setContentText(
-                    if (receivedFiles.isEmpty()) {
-                        getString(R.string.msg_copied_to_clipboard)
-                    } else if (isPartial) {
-                        resources.getQuantityString(
-                            R.plurals.noti_complete_partial, receivedFiles.size, receivedFiles.size
-                        )
-                    } else {
-                        resources.getQuantityString(
-                            R.plurals.noti_complete, receivedFiles.size, receivedFiles.size
-                        )
-                    }
-                )
+                .setSubText(senderName).setAutoCancel(true).setContentText(content)
+
+        IncomingTransferUiCoordinator.get(taskId)?.takeIf { it.isText }?.let {
+            builder.setContentIntent(viewerPendingIntent(it, manualResult = true))
+        }
 
         if (receivedFiles.isEmpty()) {
             return builder.build()
         }
 
         builder.setStyle(
-            NotificationCompat.BigTextStyle()
-                .bigText(receivedFiles.take(5).joinToString("\n") { it.name })
+            if (receivedFiles.size == 1) {
+                NotificationCompat.BigTextStyle().bigText(receivedFiles.first().name)
+            } else {
+                val inbox = NotificationCompat.InboxStyle().setSummaryText(content)
+                receivedFiles.take(5).forEach { inbox.addLine(it.name) }
+                inbox
+            }
         )
 
-        val intent = if (receivedFiles.size == 1) {
+        val openPendingIntent = if (receivedFiles.size == 1) {
             val rf = receivedFiles.first()
-            Intent(Intent.ACTION_VIEW).apply {
+            val openIntent = Intent(Intent.ACTION_VIEW).apply {
                 setDataAndType(rf.uri, rf.mimeType)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
-        } else {
-            Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
-                putExtra(
-                    "android.provider.extra.INITIAL_URI",
-                    "content://downloads/public_downloads".toUri()
-                )
-            }
-        }
-        builder.setContentIntent(
             PendingIntent.getActivity(
-                this, 0, intent, PendingIntent.FLAG_IMMUTABLE
+                this, taskId, openIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
             )
-        )
+        } else {
+            contentIntent
+        }
+        openPendingIntent?.let {
+            builder.setContentIntent(it)
+            builder.addAction(0, getString(R.string.open), it)
+        }
         return builder.build()
     }
 
-    private fun createFailedNotification(exception: Throwable?): Notification {
-        return createNotificationBuilder(R.drawable.ic_warning)
-            .setContentTitle(getString(R.string.recv_fail))
-            .setContentText(
-                if (exception != null && exception is ExceptionWithMessage) {
-                    exception.getMessage(this)
-                } else if (exception != null && exception is CancelledByUserException) {
-                    if (exception.isRemote) {
-                        getString(R.string.cancelled_by_user_remote)
-                    } else {
-                        getString(R.string.cancelled_by_user_local)
-                    }
-                } else {
-                    getString(R.string.noti_recv_interrupted)
-                }
-            )
+    private fun createFailedNotification(
+        taskId: Int, exception: Throwable?, contentIntent: PendingIntent?, peerBrandId: Int?,
+    ): Notification {
+        val state = IncomingTransferUiCoordinator.get(taskId) ?: IncomingTransferUiState(
+            taskId, getString(R.string.device), null, "", 1, 0L, IncomingTransferUiStatus.FAILED,
+            errorMessage = getString(R.string.noti_recv_interrupted),
+        )
+        val content = state.errorMessage ?: if (exception != null && exception is ExceptionWithMessage) {
+            exception.getMessage(this)
+        } else if (exception != null && exception is CancelledByUserException) {
+            if (exception.isRemote) {
+                getString(R.string.cancelled_by_user_remote)
+            } else {
+                getString(R.string.cancelled_by_user_local)
+            }
+        } else {
+            getString(R.string.noti_recv_interrupted)
+        }
+        return createNotificationBuilder(
+            R.drawable.ic_warning,
+            if (state.isText) viewerPendingIntent(state, manualResult = true) else contentIntent,
+            state.brandId ?: peerBrandId,
+        )
+            .setContentTitle(getString(me.pipi.easyshare.incomingTransferTitle(state.status, state.stage)))
+            .setContentText(content)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(content))
             .setAutoCancel(true).build()
     }
 
@@ -517,15 +646,19 @@ class P2pReceiverService : BaseP2pService() {
     private suspend fun runReceive(
         p2pInfo: P2pInfo,
         localTaskId: Int,
+        customDir: DocumentFile?,
+        contentIntent: PendingIntent?,
+        peerAddress: String?,
+        onPeerIdentified: (Int?) -> Unit,
     ) = coroutineScope {
-        updateStage(localTaskId, getString(R.string.device), LiveStage.PREPARING)
+        updateStage(localTaskId, getString(R.string.device), LiveStage.PREPARING, contentIntent = contentIntent)
         val secureSession = SessionSecurity.usesModernProtocol(p2pInfo.cryptoVersion)
         if (secureSession) {
             require(!p2pInfo.authToken.isNullOrBlank())
             require(p2pInfo.certificateSha256?.matches(Regex("[0-9a-f]{64}")) == true)
         }
         val expectedCertificate = p2pInfo.certificateSha256.takeIf { secureSession }
-        fun createClient(p2pSocketFactory: SocketFactory?) = HttpClient(OkHttp) {
+        fun createClient() = HttpClient(OkHttp) {
             install(WebSockets)
             engine {
                 config {
@@ -537,9 +670,6 @@ class P2pReceiverService : BaseP2pService() {
                     connectionPool(
                         ConnectionPool(5, 10, TimeUnit.SECONDS)
                     )
-                    if (p2pSocketFactory != null) {
-                        socketFactory(p2pSocketFactory)
-                    }
                     sslSocketFactory(sslContext.socketFactory, tm)
                     hostnameVerifier { _, session ->
                         if (expectedCertificate == null) {
@@ -571,25 +701,17 @@ class P2pReceiverService : BaseP2pService() {
         }
         p2pManager.connectSuspend(p2pChannel, p2pConfig)
         try {
-            val (wifiP2pInfo, p2pGroup) = p2pFuture.awaitWithTimeout(
+            val (wifiP2pInfo, joinedGroup) = p2pFuture.awaitWithTimeout(
                 Duration.ofSeconds(10), "Waiting for P2P connect", R.string.error_p2p_failed
             )
-            val p2pSocketFactory = if (Build.VERSION.SDK_INT >= EXPLICIT_P2P_NETWORK_API) {
-                awaitP2pNetwork(p2pGroup.`interface`)?.socketFactory
-                    ?: throw ExceptionWithMessage(
-                        "P2P network route was not ready",
-                        IllegalStateException("No network for P2P interface"),
-                        R.string.error_p2p_failed,
-                    )
-            } else {
-                // One UI on Android 16 installs the Wi-Fi Direct route without exposing
-                // the P2P interface as a ConnectivityManager Network. Give that route a
-                // moment to settle, then let the system route the socket normally.
-                delay(P2P_ROUTE_SETTLE_MS)
-                null
-            }
+            val joinedOwnerName = IncomingPeerIdentity.verifiedJoinedOwnerName(
+                joinedGroup.networkName, p2pInfo.ssid, joinedGroup.isGroupOwner, joinedGroup.owner?.deviceName,
+            )
+            // Wi-Fi Direct can install a route without exposing a ConnectivityManager
+            // Network. Let the route settle, then use the group owner's system route.
+            delay(P2P_ROUTE_SETTLE_MS)
 
-            createClient(p2pSocketFactory).use { client ->
+            createClient().use { client ->
                 val hostPort = "${wifiP2pInfo.groupOwnerAddress.hostAddress}:${p2pInfo.port}"
 
                 val sendRequestFuture = CompletableDeferred<JSONObject>()
@@ -607,27 +729,39 @@ class P2pReceiverService : BaseP2pService() {
                     )
 
                     val taskId = sendRequestPayload.optString("taskId", sendRequestPayload.optString("id"))
-                    val senderName = BleUtils.normalizeDeviceName(
+                    val requestedSenderName = BleUtils.normalizeDeviceName(
                         sendRequestPayload.getString("senderName"),
                     )
                     val senderBrandId = sendRequestPayload.optInt("senderBrandId", -1)
                         .takeIf { it >= 0 }
-                    val rawSenderBrand = if (sendRequestPayload.has("senderBrand")) {
-                        sendRequestPayload.getString("senderBrand")
+                    val rawSenderBrand = if (!sendRequestPayload.isNull("senderBrand")) {
+                        sendRequestPayload.optString("senderBrand").trim().takeIf { it.isNotEmpty() }
                     } else {
-                        senderBrandId?.let(DeviceUtils::knownDeviceNameById)
+                        null
                     }
-                    val senderBrand = rawSenderBrand
+                    val senderIdentity = IncomingPeerIdentity.resolve(
+                        requestedSenderName, senderBrandId, rawSenderBrand, peerAddress,
+                        sendRequestPayload.optString("senderId"), SystemClock.elapsedRealtime(),
+                        joinedOwnerName = joinedOwnerName,
+                    )
+                    val senderName = senderIdentity.name
+                    val resolvedSenderBrandId = senderIdentity.brandId
+                    onPeerIdentified(resolvedSenderBrandId)
+                    Log.i(TAG, "Incoming peer identity source=${senderIdentity.source}, " +
+                        "brandKnown=${resolvedSenderBrandId != null}, nameFromRequest=${senderName == requestedSenderName}, " +
+                        "joinedOwnerNameAvailable=${!joinedOwnerName.isNullOrBlank()}")
+                    val senderBrand = (rawSenderBrand ?: resolvedSenderBrandId?.let(DeviceUtils::knownDeviceNameById))
                         ?.takeUnless { it.equals("Unknown", ignoreCase = true) }
                         ?: getString(R.string.unknown)
                     val senderDisplayName = if (senderBrand == getString(R.string.unknown)) {
                         senderName
                     } else {
-                        "$senderName ($senderBrand)"
+                        getString(R.string.sender_identity_brand, senderName, senderBrand)
                     }
                     if (BuildConfig.DEBUG) Log.d(TAG, "Sender metadata received")
 
-                    updateStage(localTaskId, senderDisplayName, LiveStage.HANDSHAKE)
+                    updateStage(localTaskId, senderDisplayName, LiveStage.HANDSHAKE,
+                        contentIntent = contentIntent, peerBrandId = resolvedSenderBrandId)
 
                     val totalSize = sendRequestPayload.getLong("totalSize")
                     val fileCount = sendRequestPayload.getInt("fileCount")
@@ -645,29 +779,31 @@ class P2pReceiverService : BaseP2pService() {
                         totalSize = totalSize,
                         textSize = textContent?.toByteArray(Charsets.UTF_8)?.size?.toLong(),
                     )
-                    if (textContent == null) ensureReceiveStorage(totalSize)
+                    if (textContent == null) ensureReceiveStorage(totalSize, customDir)
 
                     run {
                         val requestedFileName = sendRequestPayload.optString("fileName")
-                        IncomingTransferUiCoordinator.publish(
-                            IncomingTransferUiState(
+                        val requestState = IncomingTransferUiState(
                                 taskId = localTaskId,
                                 senderName = senderName,
-                                brandId = senderBrandId,
+                                brandId = resolvedSenderBrandId,
                                 fileName = requestedFileName,
                                 fileCount = fileCount,
                                 totalSize = totalSize,
                                 status = IncomingTransferUiStatus.REQUESTED,
-                            ),
-                        )
+                                isText = textContent != null,
+                                mimeType = sendRequestPayload.optString("mimeType").takeIf { it.isNotBlank() },
+                                receiveDirectoryUri = receiveDirectoryUri(customDir).toString(),
+                            )
+                        check(IncomingTransferUiCoordinator.beginRequest(
+                            requestState,
+                            SystemClock.elapsedRealtime() + INCOMING_REQUEST_TIMEOUT_MS,
+                            getString(R.string.incoming_transfer_timeout),
+                            getString(R.string.cancelled_by_user_local),
+                        ))
                         val incomingIntent = IncomingTransferActivity.createIntent(
                             context = this@P2pReceiverService,
-                            taskId = localTaskId,
-                            senderName = senderName,
-                            fileName = requestedFileName,
-                            fileCount = fileCount,
-                            totalSize = totalSize,
-                            brandId = senderBrandId,
+                            state = requestState,
                         )
                         val requestSummary = if (textContent != null) {
                             getString(R.string.noti_request_desc_text)
@@ -679,35 +815,28 @@ class P2pReceiverService : BaseP2pService() {
                                 Formatter.formatFileSize(this@P2pReceiverService, totalSize),
                             )
                         }
-                        val requestPendingIntent = PendingIntent.getActivity(
-                            this@P2pReceiverService,
-                            localTaskId,
-                            incomingIntent,
-                            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-                        )
-                        updateStage(
-                            localTaskId,
-                            senderDisplayName,
-                            LiveStage.WAITING_AUTH,
-                            contentOverride = requestSummary,
-                            contentIntent = requestPendingIntent,
-                        )
+                        observeRequest(localTaskId, requestSummary, contentIntent)
 
-                        if (MyApplication.getInstance().hasVisibleActivity()) {
-                            startActivity(
-                                incomingIntent.addFlags(
-                                    Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP,
-                                ),
-                            )
+                        withContext(Dispatchers.Main) {
+                            if (MyApplication.getInstance().hasVisibleActivity()) {
+                                try {
+                                    startActivity(incomingIntent)
+                                } catch (error: SecurityException) {
+                                    Log.w(TAG, "Incoming sheet launch denied; keeping notification controls", error)
+                                } catch (error: android.content.ActivityNotFoundException) {
+                                    Log.w(TAG, "Incoming sheet unavailable; keeping notification controls", error)
+                                }
+                            }
                         }
 
-                        val userResponse = withTimeoutOrNull(INCOMING_REQUEST_TIMEOUT_MS) {
-                            waitForAction(localTaskId)
-                        }
+                        val userResponse = IncomingTransferUiCoordinator.awaitDecision(localTaskId)
 
                         when (userResponse) {
                             IncomingRequestDecision.ACCEPTED -> Unit
                             IncomingRequestDecision.REJECTED -> {
+                                showTransferResult(localTaskId, createFailedNotification(
+                                    localTaskId, CancelledByUserException(false), contentIntent, resolvedSenderBrandId,
+                                ))
                                 wsSession.sendStatusIgnoreException(
                                     99,
                                     taskId,
@@ -716,12 +845,10 @@ class P2pReceiverService : BaseP2pService() {
                                 )
                                 throw CancelledByUserException(false)
                             }
-                            IncomingRequestDecision.TIMED_OUT,
-                            null -> {
-                                IncomingTransferUiCoordinator.fail(
-                                    localTaskId,
-                                    getString(R.string.incoming_transfer_timeout),
-                                )
+                            IncomingRequestDecision.TIMED_OUT -> {
+                                showTransferResult(localTaskId, createFailedNotification(
+                                    localTaskId, null, contentIntent, resolvedSenderBrandId,
+                                ))
                                 wsSession.sendStatusIgnoreException(
                                     99,
                                     taskId,
@@ -731,7 +858,7 @@ class P2pReceiverService : BaseP2pService() {
                                 throw CancellationException("Incoming request timed out")
                             }
                         }
-                        IncomingTransferUiCoordinator.markReceiving(localTaskId)
+                        IncomingTransferUiCoordinator.markReceiving(localTaskId, stage = LiveStage.PREPARING)
                     }
                     if (textContent != null) {
                         val cm = getSystemService(ClipboardManager::class.java)
@@ -739,15 +866,19 @@ class P2pReceiverService : BaseP2pService() {
 
                         showTextCopiedToast()
 
-                        wsSession.sendStatusIgnoreException(99, taskId, 1, "ok")
                         IncomingTransferUiCoordinator.complete(
                             localTaskId,
                             files = emptyList(),
                             partial = false,
                         )
+                        ensureReceiveCompleted(localTaskId)
                         showTransferResult(
-                            createCompletedNotification(senderName, emptyList(), isPartial = false),
+                            localTaskId,
+                            createCompletedNotification(
+                                localTaskId, senderName, emptyList(), isPartial = false, contentIntent = contentIntent,
+                            ),
                         )
+                        wsSession.sendStatusIgnoreException(99, taskId, 1, "ok")
                         delay(1000)
                         return@async
                     }
@@ -758,15 +889,17 @@ class P2pReceiverService : BaseP2pService() {
                     }
 
                     val files = client.prepareGet(downloadUrl).execute { downloadRes ->
+                        IncomingTransferUiCoordinator.markReceiving(localTaskId)
                         val ist = downloadRes.bodyAsChannel().toInputStream()
 
+                        var currentProgress = 0
                         val progress = ProgressCounter(totalSize) { total, processed ->
                             val percent = if (total > 0L) {
                                 (100.0 * processed / total).toInt().coerceIn(0, 100)
                             } else {
                                 0
                             }
-                            updateStage(localTaskId, senderDisplayName, LiveStage.TRANSFERRING, percent, currentFileName)
+                            currentProgress = percent.coerceIn(0, 99)
                             IncomingTransferUiCoordinator.markReceiving(
                                 localTaskId,
                                 progress = percent,
@@ -780,28 +913,22 @@ class P2pReceiverService : BaseP2pService() {
                                 progress = progress,
                                 expectedFileCount = fileCount,
                                 expectedTotalSize = totalSize,
+                                customDir = customDir,
+                                onFilesSaved = { savedFiles ->
+                                    completeReceivedFiles(localTaskId, savedFiles, fileCount, contentIntent)
+                                },
                             ) { name ->
                                 currentFileName = name
-                                updateStage(localTaskId, senderDisplayName, LiveStage.TRANSFERRING, 0, name)
+                                IncomingTransferUiCoordinator.markReceiving(
+                                    localTaskId,
+                                    progress = currentProgress, fileName = name,
+                                )
                             }
                         }
                     }
-                    updateStage(localTaskId, senderDisplayName, LiveStage.FINALIZING)
-
                     if (files.isNotEmpty()) {
                         val isPartial = files.size != fileCount
-                        showTransferResult(
-                            createCompletedNotification(
-                                senderName,
-                                files,
-                                isPartial,
-                            ),
-                        )
-                        IncomingTransferUiCoordinator.complete(
-                            localTaskId,
-                            files = files,
-                            partial = isPartial,
-                        )
+                        ensureReceiveCompleted(localTaskId)
                         wsSession.sendStatusIgnoreException(
                             99,
                             taskId,
@@ -891,26 +1018,37 @@ class P2pReceiverService : BaseP2pService() {
         }
     }
 
-    private fun getCustomDownloadDir(): DocumentFile? {
-        val settings = AppSettings(this)
-        val uriStr = settings.downloadUri ?: return null
-        val uri = Uri.parse(uriStr)
+    private fun getCustomDownloadDir(): DocumentFile? = getCustomDownloadDir(this)
 
-        val hasPermission = contentResolver.persistedUriPermissions.any {
-            it.uri.toString() == uri.toString() && it.isWritePermission
+    private fun ensureReceiveCompleted(taskId: Int) {
+        if (!hasCompletedResult(taskId)) {
+            throw CancelledByUserException(false)
         }
-        if (!hasPermission) {
-            Log.w(TAG, "No persisted permission for configured download directory")
-            return null
+    }
+
+    private fun hasCompletedResult(taskId: Int): Boolean =
+        IncomingTransferUiCoordinator.get(taskId)?.status.let {
+            it == IncomingTransferUiStatus.SUCCESS || it == IncomingTransferUiStatus.PARTIAL
         }
 
-        return try {
-            val df = DocumentFile.fromTreeUri(this, uri)
-            if (df?.exists() == true && df.isDirectory) df else null
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to resolve custom download dir", e)
+    private suspend fun completeReceivedFiles(
+        taskId: Int, files: List<ReceivedFile>, expectedFileCount: Int, contentIntent: PendingIntent?,
+    ) = withContext(NonCancellable) {
+        val state = IncomingTransferUiCoordinator.get(taskId) ?: return@withContext
+        val partial = files.size != expectedFileCount
+        IncomingTransferUiCoordinator.markReceiving(taskId, progress = 99, stage = LiveStage.FINALIZING)
+        val token = try {
+            ReceivedFilesSnapshot.save(this@P2pReceiverService, files)
+        } catch (error: Exception) {
+            // Files are already published; optional snapshot failure must not revoke them.
+            Log.w(TAG, "Failed to save received-file navigation", error)
             null
         }
+        IncomingTransferUiCoordinator.complete(taskId, files, partial, token)
+        ensureReceiveCompleted(taskId)
+        showTransferResult(
+            taskId, createCompletedNotification(taskId, state.senderName, files, partial, contentIntent),
+        )
     }
 
     private fun deleteReceivedFile(receivedFile: ReceivedFile) {
@@ -929,11 +1067,13 @@ class P2pReceiverService : BaseP2pService() {
         }
     }
 
-    private fun saveArchive(
+    private suspend fun saveArchive(
         zipStream: ZipInputStream,
         progress: ProgressCounter,
         expectedFileCount: Int,
         expectedTotalSize: Long,
+        customDir: DocumentFile?,
+        onFilesSaved: suspend (List<ReceivedFile>) -> Unit,
         onFileStart: (String) -> Unit
     ): List<ReceivedFile> {
         val receivedFiles = mutableListOf<ReceivedFile>()
@@ -945,10 +1085,9 @@ class P2pReceiverService : BaseP2pService() {
             dalvik.system.ZipPathValidator.setCallback(ZipPathValidatorCallback)
         }
 
-        try {
-            val customDir = getCustomDownloadDir()
-
+        val savedFiles = try {
             while (true) {
+                currentCoroutineContext().ensureActive()
                 val entry = try {
                     zipStream.nextEntry
                 } catch (error: ZipException) {
@@ -1019,6 +1158,7 @@ class P2pReceiverService : BaseP2pService() {
 
                     os.use {
                         while (true) {
+                            currentCoroutineContext().ensureActive()
                             val readLen = zipStream.read(buffer)
                             if (readLen == -1) {
                                 break
@@ -1088,8 +1228,7 @@ class P2pReceiverService : BaseP2pService() {
                 )
             }
             if (BuildConfig.DEBUG) Log.d(TAG, "Received ${receivedFiles.size} files")
-
-            return receivedFiles
+            receivedFiles.toList()
         } catch (error: Throwable) {
             if (ArchiveReceiveRecovery.canKeepCompletedFiles(error, receivedFiles.size)) {
                 Log.w(
@@ -1097,74 +1236,29 @@ class P2pReceiverService : BaseP2pService() {
                     "Transfer interrupted after ${receivedFiles.size} completed files; keeping them",
                     error,
                 )
-                progress.complete(processedSize)
-                return receivedFiles.toList()
+                receivedFiles.toList()
+            } else {
+                receivedFiles.forEach(::deleteReceivedFile)
+                throw error
             }
-            receivedFiles.forEach(::deleteReceivedFile)
-            throw error
         } finally {
             if (platformValidatorInstalled) {
                 dalvik.system.ZipPathValidator.clearCallback()
             }
         }
-    }
-
-    private suspend fun waitForAction(taskId: Int) = suspendCancellableCoroutine { continuation ->
-        var registered = true
-        lateinit var receiver: BroadcastReceiver
-
-        fun unregister() {
-            if (!registered) return
-            registered = false
-            try {
-                unregisterReceiver(receiver)
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to unregister waitForAction receiver", e)
-            }
-        }
-
-        receiver = object : BroadcastReceiver() {
-            override fun onReceive(context: Context, intent: Intent) {
-                if (intent.getIntExtra("taskId", -1) != taskId) {
-                    return
-                }
-
-                when (intent.action) {
-                    ACTION_ACCEPTED -> {
-                        unregister()
-                        if (continuation.isActive) {
-                            continuation.resume(IncomingRequestDecision.ACCEPTED) { _, _, _ -> }
-                        }
-                    }
-                    ACTION_DISMISSED -> {
-                        unregister()
-                        if (continuation.isActive) {
-                            continuation.resume(IncomingRequestDecision.REJECTED) { _, _, _ -> }
-                        }
-                    }
-                    ACTION_TIMED_OUT -> {
-                        unregister()
-                        if (continuation.isActive) {
-                            continuation.resume(IncomingRequestDecision.TIMED_OUT) { _, _, _ -> }
-                        }
-                    }
-                }
-            }
-        }
-
-        val filter = IntentFilter().apply {
-            addAction(ACTION_ACCEPTED)
-            addAction(ACTION_DISMISSED)
-            addAction(ACTION_TIMED_OUT)
-        }
-        registerInternalBroadcastReceiver(receiver, filter)
-
-        continuation.invokeOnCancellation { unregister() }
+        // Storage is committed; presentation failures must never enter archive rollback.
+        // A canceled HTTP parent cannot deliver its result, so finalize before unwinding.
+        withContext(NonCancellable) { onFilesSaved(savedFiles) }
+        return savedFiles
     }
 
     fun cancel(taskId: Int) {
         synchronized(currentTaskLock) {
             if (currentTaskId == taskId) {
+                val state = IncomingTransferUiCoordinator.get(taskId)
+                if (state != null && !IncomingTransferUiCoordinator.cancelReceiving(
+                    taskId, getString(R.string.cancelled_by_user_local),
+                )) return
                 currentJob?.cancel(CancelledByUserException(false))
             }
         }
@@ -1192,11 +1286,58 @@ class P2pReceiverService : BaseP2pService() {
 
     companion object {
         val TAG: String = P2pReceiverService::class.java.simpleName
-        private const val INCOMING_REQUEST_TIMEOUT_MS = 31_000L
-        private const val EXPLICIT_P2P_NETWORK_API = 37
+        private const val INCOMING_REQUEST_TIMEOUT_MS = 30_000L
         private const val P2P_ROUTE_SETTLE_MS = 500L
+        private val DEFAULT_DOWNLOAD_RELATIVE_PATH = "${Environment.DIRECTORY_DOWNLOADS}/Easy Share"
         private const val STATUS_REASON_OK = TransferStatusProtocol.REASON_OK
         private const val STATUS_REASON_PARTIAL = TransferStatusProtocol.REASON_PARTIAL
+
+        private fun receiveDirectoryUri(customDir: DocumentFile?): Uri =
+            customDir?.uri ?: DocumentsContract.buildDocumentUri(
+                "com.android.externalstorage.documents", "primary:$DEFAULT_DOWNLOAD_RELATIVE_PATH",
+            )
+
+        private fun receivedDirectoryIntent(context: Context, customDir: DocumentFile?): Intent =
+            receivedDirectoryIntent(context, receiveDirectoryUri(customDir))
+
+        fun receivedDirectoryIntent(context: Context, directoryUri: Uri): Intent {
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(directoryUri, DocumentsContract.Document.MIME_TYPE_DIR)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                // MediaStore access cannot grant a SAF directory; only forward an existing custom tree grant.
+                if (DocumentsContract.isTreeUri(directoryUri) && context.checkUriPermission(
+                        directoryUri, android.os.Process.myPid(), android.os.Process.myUid(),
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                    ) == PackageManager.PERMISSION_GRANTED
+                ) {
+                    clipData = ClipData.newRawUri("", DocumentsContract.buildTreeDocumentUri(
+                        requireNotNull(directoryUri.authority), DocumentsContract.getTreeDocumentId(directoryUri),
+                    ))
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
+                }
+            }
+            val systemActivity = context.packageManager.queryIntentActivities(intent, PackageManager.MATCH_DEFAULT_ONLY)
+                .firstOrNull {
+                    it.activityInfo.applicationInfo.flags and
+                        (ApplicationInfo.FLAG_SYSTEM or ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
+                }?.activityInfo
+            if (systemActivity != null) intent.component = ComponentName(systemActivity.packageName, systemActivity.name)
+            return intent
+        }
+
+        private fun getCustomDownloadDir(context: Context): DocumentFile? {
+            val uri = AppSettings(context).downloadUri?.let(Uri::parse) ?: return null
+            if (context.contentResolver.persistedUriPermissions.none { it.uri == uri && it.isWritePermission }) {
+                Log.w(TAG, "No persisted permission for configured download directory")
+                return null
+            }
+            return try {
+                DocumentFile.fromTreeUri(context, uri)?.takeIf { it.exists() && it.isDirectory }
+            } catch (error: Exception) {
+                Log.w(TAG, "Failed to resolve custom download dir", error)
+                null
+            }
+        }
         fun getIntent(context: Context, p2pInfo: P2pInfo): Intent {
             return Intent(context, P2pReceiverService::class.java).apply {
                 putExtra("p2p_info", p2pInfo)

@@ -31,6 +31,16 @@ class BleUtilsTest {
 
         assertTrue(encoded.size <= 16)
         assertTrue(BleUtils.deviceNameFromAdvertisement(data)!!.endsWith("..."))
+        assertTrue(BleUtils.deviceDisplayNameFromAdvertisement(data)!!.endsWith("…"))
+    }
+
+    @Test
+    fun literalEllipsisInDeviceNameIsNotRewritten() {
+        val encoded = BleUtils.advertisementNameBytes("Phone...")
+        val data = ByteArray(27).apply { encoded.copyInto(this, destinationOffset = 10) }
+
+        assertEquals("Phone...", BleUtils.deviceNameFromAdvertisement(data))
+        assertEquals("Phone...", BleUtils.deviceDisplayNameFromAdvertisement(data))
     }
 
     @Test

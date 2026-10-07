@@ -2,13 +2,13 @@ package me.pipi.easyshare.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-val EasyShareBlue = Color(0xFF00B7EA)
+val EasyShareBlue = Color(0xFF007596)
 val EasyShareBlueDark = Color(0xFF54D3F5)
 
 val FlymeLightBackground = Color(0xFFF5F5F7)
 val FlymeLightSurface = Color(0xFFFFFFFF)
 val FlymeLightOnSurface = Color(0xFF171719)
-val FlymeLightOnSurfaceVariant = Color(0xFF747479)
+val FlymeLightOnSurfaceVariant = Color(0xFF646469)
 val FlymeLightOutline = Color(0xFFDADADD)
 
 val FlymeDarkBackground = Color(0xFF000000)

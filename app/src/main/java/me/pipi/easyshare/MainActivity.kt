@@ -25,12 +25,18 @@ import java.io.File
 
 class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels()
+    private var enableReceiverAfterPermission = false
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { results ->
-        val denied = results.filterValues { granted -> !granted }.keys
-        if (denied.isNotEmpty()) {
+    ) {
+        val shouldEnable = enableReceiverAfterPermission
+        enableReceiverAfterPermission = false
+        if (missingTransferPermissions(includeNotifications = true).isEmpty()) {
+            if (shouldEnable) viewModel.setReceiverEnabled(true)
+            viewModel.refreshRadioState()
+            MyApplication.getInstance().reconcileReceiver()
+        } else if (shouldEnable) {
             Toast.makeText(
                 this,
                 getString(R.string.permission_not_granted),
@@ -41,7 +47,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        requestMissingPermissions()
+        enableReceiverAfterPermission = savedInstanceState?.getBoolean(PENDING_RECEIVER_PERMISSION) ?: false
         enableEdgeToEdge()
 
         setContent {
@@ -72,7 +78,7 @@ class MainActivity : ComponentActivity() {
 
                 MainScreen(
                     state = state,
-                    onReceiverChanged = viewModel::setReceiverEnabled,
+                    onReceiverChanged = ::setReceiverEnabled,
                     onDeviceNameChanged = viewModel::setDeviceName,
                     onBrandChanged = viewModel::setBrand,
                     onChooseReceivePath = { chooseReceivePath.launch(null) },
@@ -82,12 +88,35 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+        if (savedInstanceState == null) {
+            val permissions = missingTransferPermissions(includeNotifications = true)
+            if (permissions.isNotEmpty()) permissionLauncher.launch(permissions.toTypedArray())
+        }
     }
 
-    private fun requestMissingPermissions() {
-        val permissions = missingTransferPermissions(includeNotifications = true)
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putBoolean(PENDING_RECEIVER_PERMISSION, enableReceiverAfterPermission)
+        super.onSaveInstanceState(outState)
+    }
 
-        if (permissions.isNotEmpty()) permissionLauncher.launch(permissions.toTypedArray())
+    override fun onResume() {
+        super.onResume()
+        viewModel.refreshRadioState()
+    }
+
+    private fun setReceiverEnabled(enabled: Boolean) {
+        if (!enabled) {
+            enableReceiverAfterPermission = false
+            viewModel.setReceiverEnabled(false)
+            return
+        }
+        val permissions = missingTransferPermissions(includeNotifications = true)
+        if (permissions.isEmpty()) {
+            viewModel.setReceiverEnabled(true)
+        } else {
+            enableReceiverAfterPermission = true
+            permissionLauncher.launch(permissions.toTypedArray())
+        }
     }
 
     private fun captureAndShareLogs() {
@@ -126,5 +155,9 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    companion object {
+        private const val PENDING_RECEIVER_PERMISSION = "pendingReceiverPermission"
     }
 }

@@ -39,13 +39,22 @@ object BleUtils {
     }
 
     fun deviceNameFromAdvertisement(data: ByteArray): String? {
+        val decoded = decodedAdvertisementName(data) ?: return null
+        return if (decoded.endsWith('\t')) decoded.removeSuffix("\t") + "..." else decoded
+    }
+
+    fun deviceDisplayNameFromAdvertisement(data: ByteArray): String? {
+        val decoded = decodedAdvertisementName(data) ?: return null
+        return if (decoded.endsWith('\t')) decoded.removeSuffix("\t") + "…" else decoded
+    }
+
+    private fun decodedAdvertisementName(data: ByteArray): String? {
         if (data.size != 27) return null
         val end = (10..25).firstOrNull { data[it] == 0.toByte() } ?: 26
         if (end == 10) return null
-        val decoded = runCatching {
+        return runCatching {
             data.copyOfRange(10, end).decodeToString(throwOnInvalidSequence = true)
-        }.getOrNull()?.takeIf { it.isNotBlank() } ?: return null
-        return if (decoded.endsWith('\t')) decoded.removeSuffix("\t") + "..." else decoded
+        }.getOrNull()?.takeIf { it.isNotBlank() }
     }
 
     fun normalizeDeviceName(value: String): String {

@@ -1,12 +1,10 @@
 package me.pipi.easyshare
 
-import android.app.DownloadManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.drawable.ColorDrawable
+import android.net.Uri
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import android.text.format.Formatter
@@ -19,14 +17,13 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -34,6 +31,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.Lifecycle
 import me.pipi.easyshare.models.IncomingTransferUiState
 import me.pipi.easyshare.models.IncomingTransferUiStatus
 import me.pipi.easyshare.models.ReceivedFile
@@ -41,62 +41,31 @@ import me.pipi.easyshare.services.P2pReceiverService
 import me.pipi.easyshare.ui.theme.EasyShareTheme
 import me.pipi.easyshare.ui.transfer.TransferSheet
 import me.pipi.easyshare.ui.transfer.TransferVisualState
-import me.pipi.easyshare.ui.transfer.fileTypeLabel
+import me.pipi.easyshare.ui.transfer.AttachmentKind
+import me.pipi.easyshare.ui.transfer.attachmentKind
+import me.pipi.easyshare.utils.LiveStage
 import me.pipi.easyshare.utils.DeviceUtils
-import me.pipi.easyshare.utils.INTERNAL_BROADCAST_PERMISSION
+import me.pipi.easyshare.utils.IncomingRequestDecision
 import me.pipi.easyshare.utils.IncomingTransferUiCoordinator
+import me.pipi.easyshare.utils.ReceivedFilesSnapshot
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class IncomingTransferActivity : ComponentActivity() {
-    private val responded = AtomicBoolean()
-    private val timeoutHandler = Handler(Looper.getMainLooper())
-    private var remainingSeconds by mutableIntStateOf(REQUEST_TIMEOUT_SECONDS)
-    private var taskId: Int = Int.MIN_VALUE
-    private var cancelEnabledAtMillis = Long.MIN_VALUE
-
-    private val countdownRunnable = object : Runnable {
-        override fun run() {
-            if (responded.get()) return
-            remainingSeconds--
-            if (remainingSeconds <= 0) {
-                timeoutAndFinish()
-                return
-            }
-            timeoutHandler.postDelayed(this, 1_000L)
-        }
-    }
+    private var transferTaskId by mutableIntStateOf(Int.MIN_VALUE)
+    private var lastPresentation by mutableStateOf<IncomingTransferUiState?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        taskId = intent.getIntExtra(EXTRA_TASK_ID, Int.MIN_VALUE)
-        if (taskId == Int.MIN_VALUE) {
-            finish()
-            return
-        }
-
-        val fallbackState = IncomingTransferUiState(
-            taskId = taskId,
-            senderName = intent.getStringExtra(EXTRA_SENDER_NAME).orEmpty(),
-            fileName = intent.getStringExtra(EXTRA_FILE_NAME).orEmpty(),
-            fileCount = intent.getIntExtra(EXTRA_FILE_COUNT, 1).coerceAtLeast(1),
-            totalSize = intent.getLongExtra(EXTRA_TOTAL_SIZE, 0L).coerceAtLeast(0L),
-            brandId = intent.getIntExtra(EXTRA_BRAND_ID, -1).takeIf { it >= 0 },
-            status = IncomingTransferUiStatus.REQUESTED,
-        )
-        if (IncomingTransferUiCoordinator.get(taskId) == null) {
-            IncomingTransferUiCoordinator.publish(fallbackState)
-        }
-
-        val initialStatus = IncomingTransferUiCoordinator.get(taskId)?.status
-        if (initialStatus != IncomingTransferUiStatus.REQUESTED) {
-            responded.set(true)
-        }
+        if (!readEntry(intent, savedInstanceState)) return
 
         window.setBackgroundDrawable(ColorDrawable(android.graphics.Color.TRANSPARENT))
         window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-        window.attributes = window.attributes.apply { dimAmount = 0.24f }
+        window.attributes = window.attributes.apply { dimAmount = 0.18f }
         window.setLayout(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -106,113 +75,171 @@ class IncomingTransferActivity : ComponentActivity() {
         setContent {
             EasyShareTheme {
                 val states by IncomingTransferUiCoordinator.states.collectAsState()
-                val state = states[taskId] ?: fallbackState
-                LaunchedEffect(state.status) {
-                    if (
-                        state.status == IncomingTransferUiStatus.SUCCESS ||
-                        state.status == IncomingTransferUiStatus.PARTIAL
-                    ) {
-                        delay(RECEIVE_RESULT_AUTO_CLOSE_MILLIS)
-                        finish()
+                val shownTaskId = transferTaskId
+                val presentation = states[shownTaskId] ?: lastPresentation ?: return@EasyShareTheme
+                var loadedFiles by remember(shownTaskId, presentation.receivedFilesToken) {
+                    mutableStateOf(emptyList<ReceivedFile>())
+                }
+                LaunchedEffect(shownTaskId, presentation.receivedFilesToken, presentation.receivedFiles.isEmpty()) {
+                    val token = presentation.receivedFilesToken
+                    if (token != null && presentation.receivedFiles.isEmpty()) {
+                        try {
+                            loadedFiles = withContext(Dispatchers.IO) {
+                                ReceivedFilesSnapshot.load(this@IncomingTransferActivity, token)
+                            }
+                        } catch (error: CancellationException) {
+                            throw error
+                        } catch (error: Exception) {
+                            Log.w(TAG, "Failed to restore received-file navigation", error)
+                        }
                     }
                 }
-                BackHandler { dismissForState(state) }
+                val state = if (presentation.receivedFiles.isEmpty() && loadedFiles.isNotEmpty()) {
+                    presentation.copy(receivedFiles = loadedFiles)
+                } else {
+                    presentation
+                }
+                androidx.compose.runtime.SideEffect {
+                    if (transferTaskId == shownTaskId) lastPresentation = state
+                }
+                var cancelEnabled by remember(shownTaskId, state.cancelEnabledAtMillis) {
+                    mutableStateOf(incomingCancelGuardRemainingMillis(state.cancelEnabledAtMillis, SystemClock.elapsedRealtime()) == 0L)
+                }
+                LaunchedEffect(shownTaskId, state.cancelEnabledAtMillis) {
+                    delay(incomingCancelGuardRemainingMillis(state.cancelEnabledAtMillis, SystemClock.elapsedRealtime()))
+                    cancelEnabled = true
+                }
+                BackHandler { hideAndFinish(shownTaskId) }
                 IncomingTransferScreen(
                     state = state,
-                    remainingSeconds = remainingSeconds,
-                    onDismiss = { dismissForState(state) },
-                    onReject = ::rejectAndFinish,
-                    onAccept = ::accept,
-                    onCancel = ::cancelAndFinish,
-                    onClose = ::finish,
-                    onOpen = { openReceivedFiles(state.receivedFiles) },
+                    cancelEnabled = cancelEnabled && !state.cancelRequested,
+                    onDismiss = { hideAndFinish(shownTaskId) },
+                    onReject = { rejectAndFinish(shownTaskId) },
+                    onAccept = { accept(shownTaskId) },
+                    onCancel = { cancelAndFinish(shownTaskId) },
+                    onClose = { hideAndFinish(shownTaskId) },
+                    onOpen = { openReceivedFiles(state, shownTaskId) },
                 )
             }
         }
+    }
 
-        if (!responded.get()) {
-            timeoutHandler.postDelayed(countdownRunnable, 1_000L)
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        readEntry(intent)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        IncomingTransferUiCoordinator.show(transferTaskId, this)
+    }
+
+    override fun onStop() {
+        IncomingTransferUiCoordinator.hide(transferTaskId, this)
+        super.onStop()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun readEntry(entry: Intent, savedInstanceState: Bundle? = null): Boolean {
+        val snapshot = entry.getParcelableExtra<IncomingTransferUiState>(EXTRA_PRESENTATION)
+        val entryTaskId = snapshot?.taskId ?: entry.getIntExtra(EXTRA_TASK_ID, Int.MIN_VALUE)
+        if (entryTaskId == Int.MIN_VALUE) {
+            finish()
+            return false
+        }
+        val metadata = snapshot ?: IncomingTransferUiState(
+            taskId = entryTaskId,
+            senderName = entry.getStringExtra(EXTRA_SENDER_NAME).orEmpty(),
+            fileName = entry.getStringExtra(EXTRA_FILE_NAME).orEmpty(),
+            fileCount = entry.getIntExtra(EXTRA_FILE_COUNT, 1).coerceAtLeast(1),
+            totalSize = entry.getLongExtra(EXTRA_TOTAL_SIZE, 0L).coerceAtLeast(0L),
+            brandId = entry.getIntExtra(EXTRA_BRAND_ID, -1).takeIf { it >= 0 },
+            status = IncomingTransferUiStatus.REQUESTED,
+            isText = entry.getBooleanExtra(EXTRA_IS_TEXT, false),
+            mimeType = entry.getStringExtra(EXTRA_MIME_TYPE),
+        )
+        val saved = savedInstanceState?.takeIf { it.getInt(STATE_TASK_ID, entryTaskId) == entryTaskId }
+        if (transferTaskId != entryTaskId) {
+            IncomingTransferUiCoordinator.hide(transferTaskId, this)
+        }
+        transferTaskId = entryTaskId
+        lastPresentation = IncomingTransferUiCoordinator.get(transferTaskId) ?: restoredIncomingState(
+            saved?.getParcelable<IncomingTransferUiState>(STATE_PRESENTATION) ?: snapshot,
+            metadata,
+            getString(R.string.noti_recv_interrupted),
+        )
+        if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+            IncomingTransferUiCoordinator.show(transferTaskId, this)
+        }
+        return true
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putInt(STATE_TASK_ID, transferTaskId)
+        (IncomingTransferUiCoordinator.get(transferTaskId) ?: lastPresentation)
+            ?.let { outState.putParcelable(STATE_PRESENTATION, it) }
+        super.onSaveInstanceState(outState)
+    }
+
+    private fun hideAndFinish(expectedTaskId: Int) {
+        if (transferTaskId != expectedTaskId) return
+        IncomingTransferUiCoordinator.hide(expectedTaskId, this)
+        finish()
+    }
+
+    private fun accept(expectedTaskId: Int) {
+        if (transferTaskId != expectedTaskId) return
+        if (IncomingTransferUiCoordinator.decide(expectedTaskId, IncomingRequestDecision.ACCEPTED)) {
+            Log.i(TAG, "Incoming transfer accepted")
         }
     }
 
-    override fun onDestroy() {
-        timeoutHandler.removeCallbacks(countdownRunnable)
-        if (isFinishing && taskId != Int.MIN_VALUE) {
-            IncomingTransferUiCoordinator.clear(taskId)
-        }
-        super.onDestroy()
-    }
-
-    private fun dismissForState(state: IncomingTransferUiState) {
-        when (state.status) {
-            IncomingTransferUiStatus.REQUESTED -> rejectAndFinish()
-            IncomingTransferUiStatus.RECEIVING -> cancelAndFinish()
-            else -> finish()
-        }
-    }
-
-    private fun accept() {
-        if (!responded.compareAndSet(false, true)) return
-        Log.i(TAG, "Incoming transfer accepted")
-        timeoutHandler.removeCallbacks(countdownRunnable)
-        cancelEnabledAtMillis = SystemClock.elapsedRealtime() + CANCEL_GUARD_MILLIS
-        IncomingTransferUiCoordinator.markReceiving(taskId)
-        sendResponse(true)
-    }
-
-    private fun rejectAndFinish() {
-        if (responded.compareAndSet(false, true)) {
+    private fun rejectAndFinish(expectedTaskId: Int) {
+        if (transferTaskId != expectedTaskId) return
+        if (IncomingTransferUiCoordinator.decide(expectedTaskId, IncomingRequestDecision.REJECTED)) {
             Log.i(TAG, "Incoming transfer rejected")
-            timeoutHandler.removeCallbacks(countdownRunnable)
-            sendResponse(false)
         }
-        finish()
+        hideAndFinish(expectedTaskId)
     }
 
-    private fun timeoutAndFinish() {
-        if (responded.compareAndSet(false, true)) {
-            Log.i(TAG, "Incoming transfer request timed out")
-            timeoutHandler.removeCallbacks(countdownRunnable)
-            sendResponse(accepted = false, timedOut = true)
-            Toast.makeText(this, R.string.incoming_transfer_timeout, Toast.LENGTH_SHORT).show()
-        }
-        finish()
-    }
-
-    private fun cancelAndFinish() {
-        if (SystemClock.elapsedRealtime() < cancelEnabledAtMillis) {
+    private fun cancelAndFinish(expectedTaskId: Int) {
+        if (transferTaskId != expectedTaskId) return
+        val state = IncomingTransferUiCoordinator.get(expectedTaskId) ?: lastPresentation ?: return
+        if (state.status != IncomingTransferUiStatus.RECEIVING) return
+        if (incomingCancelGuardRemainingMillis(state.cancelEnabledAtMillis, SystemClock.elapsedRealtime()) > 0L) {
             Log.i(TAG, "Ignoring cancel tap immediately after accepting")
             return
         }
         Log.i(TAG, "Incoming transfer canceled")
-        timeoutHandler.removeCallbacks(countdownRunnable)
-        P2pReceiverService.cancelTask(this, taskId)
-        finish()
+        P2pReceiverService.cancelTask(this, expectedTaskId)
     }
 
-    private fun sendResponse(accepted: Boolean, timedOut: Boolean = false) {
-        sendBroadcast(
-            P2pReceiverService.getResponseIntent(this, taskId, accepted, timedOut),
-            INTERNAL_BROADCAST_PERMISSION,
-        )
-    }
-
-    private fun openReceivedFiles(files: List<ReceivedFile>) {
-        val openIntent = if (files.size == 1) {
-            val file = files.first()
-            Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(file.uri, file.mimeType)
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    private fun openReceivedFiles(state: IncomingTransferUiState, expectedTaskId: Int) {
+        val files = state.receivedFiles
+        lifecycleScope.launch {
+            try {
+                val openIntent = if (files.size == 1) {
+                    val file = files.first()
+                    Intent(Intent.ACTION_VIEW).apply {
+                        setDataAndType(file.uri, file.mimeType)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                } else {
+                    P2pReceiverService.receivedDirectoryIntent(
+                        this@IncomingTransferActivity, Uri.parse(requireNotNull(state.receiveDirectoryUri)),
+                    )
+                }
+                if (transferTaskId != expectedTaskId) return@launch
+                startActivity(openIntent)
+                hideAndFinish(expectedTaskId)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                if (transferTaskId == expectedTaskId) {
+                    Toast.makeText(this@IncomingTransferActivity, R.string.open_received_file_failed, Toast.LENGTH_SHORT).show()
+                }
             }
-        } else {
-            Intent(DownloadManager.ACTION_VIEW_DOWNLOADS)
-        }
-
-        try {
-            startActivity(openIntent)
-            finish()
-        } catch (_: Throwable) {
-            Toast.makeText(this, R.string.open_received_file_failed, Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -223,10 +250,28 @@ class IncomingTransferActivity : ComponentActivity() {
         private const val EXTRA_FILE_COUNT = "fileCount"
         private const val EXTRA_TOTAL_SIZE = "totalSize"
         private const val EXTRA_BRAND_ID = "brandId"
-        private const val REQUEST_TIMEOUT_SECONDS = 30
-        private const val CANCEL_GUARD_MILLIS = 1_500L
-        private const val RECEIVE_RESULT_AUTO_CLOSE_MILLIS = 10_000L
+        private const val EXTRA_IS_TEXT = "isText"
+        private const val EXTRA_MIME_TYPE = "mimeType"
+        private const val EXTRA_PRESENTATION = "incomingPresentation"
+        private const val EXTRA_MANUAL_RESULT = "manualResult"
+        private const val STATE_TASK_ID = "incomingTaskId"
+        private const val STATE_PRESENTATION = "incomingPresentation"
         private const val TAG = "IncomingTransfer"
+
+        fun createIntent(
+            context: Context,
+            state: IncomingTransferUiState,
+            manualResult: Boolean = false,
+        ): Intent = Intent(context, IncomingTransferActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            data = Uri.Builder().scheme("easyshare").authority("incoming")
+                .appendPath(state.taskId.toString())
+                .appendPath(if (manualResult) "result" else "view")
+                .build()
+            putExtra(EXTRA_TASK_ID, state.taskId)
+            putExtra(EXTRA_PRESENTATION, state.copy(receivedFiles = emptyList()))
+            putExtra(EXTRA_MANUAL_RESULT, manualResult)
+        }
 
         fun createIntent(
             context: Context,
@@ -236,21 +281,43 @@ class IncomingTransferActivity : ComponentActivity() {
             fileCount: Int,
             totalSize: Long,
             brandId: Int?,
-        ): Intent = Intent(context, IncomingTransferActivity::class.java).apply {
-            putExtra(EXTRA_TASK_ID, taskId)
-            putExtra(EXTRA_SENDER_NAME, senderName)
-            putExtra(EXTRA_FILE_NAME, fileName)
-            putExtra(EXTRA_FILE_COUNT, fileCount)
-            putExtra(EXTRA_TOTAL_SIZE, totalSize)
-            brandId?.let { putExtra(EXTRA_BRAND_ID, it) }
-        }
+            isText: Boolean = false,
+            mimeType: String? = null,
+        ): Intent = createIntent(
+            context,
+            IncomingTransferUiState(
+                taskId = taskId,
+                senderName = senderName,
+                fileName = fileName,
+                fileCount = fileCount,
+                totalSize = totalSize,
+                brandId = brandId,
+                status = IncomingTransferUiStatus.REQUESTED,
+                isText = isText,
+                mimeType = mimeType,
+            ),
+        )
+    }
+}
+
+internal fun restoredIncomingState(
+    saved: IncomingTransferUiState?,
+    metadata: IncomingTransferUiState,
+    interruptedMessage: String,
+): IncomingTransferUiState {
+    val presentation = saved?.takeIf { it.taskId == metadata.taskId } ?: metadata
+    return when (presentation.status) {
+        IncomingTransferUiStatus.REQUESTED, IncomingTransferUiStatus.RECEIVING -> presentation.copy(
+            status = IncomingTransferUiStatus.FAILED, progress = 0, errorMessage = interruptedMessage,
+        )
+        else -> presentation
     }
 }
 
 @Composable
 private fun IncomingTransferScreen(
     state: IncomingTransferUiState,
-    remainingSeconds: Int,
+    cancelEnabled: Boolean,
     onDismiss: () -> Unit,
     onReject: () -> Unit,
     onAccept: () -> Unit,
@@ -263,91 +330,42 @@ private fun IncomingTransferScreen(
     val sizeLabel = state.totalSize.takeIf { it > 0L }?.let {
         Formatter.formatFileSize(context, it)
     }
-    val isText = state.fileName.isBlank()
-    val receivedCount = state.receivedFiles.size.takeIf { it > 0 } ?: state.fileCount
-    val headline = when {
-        isText -> stringResource(R.string.shared_text)
-        state.fileName.isNotBlank() -> state.fileName
-        else -> pluralStringResource(
-            R.plurals.incoming_transfer_multiple,
-            state.fileCount,
-            state.fileCount,
-        )
-    }
-
+    val isText = state.isText
+    val fileName = state.fileName.ifBlank { state.currentFileName ?: state.receivedFiles.firstOrNull()?.name.orEmpty() }
+    val kind = attachmentKind(fileName, state.mimeType, isText, state.fileCount)
+    val countLabel = incomingItemLabel(kind, state.fileCount)
+    val statusLabel = stringResource(incomingTransferTitle(state.status, state.stage))
     val partyText = when (state.status) {
-        IncomingTransferUiStatus.REQUESTED -> if (isText) {
-            stringResource(R.string.incoming_request_text_summary, state.senderName)
-        } else {
-            pluralStringResource(
-                R.plurals.incoming_request_summary,
-                state.fileCount,
-                state.senderName,
-                state.fileCount,
-            )
+        IncomingTransferUiStatus.REQUESTED -> stringResource(R.string.transfer_request_summary,
+            state.senderName, countLabel) + sizeLabel?.let { stringResource(R.string.transfer_request_size, it) }.orEmpty()
+        IncomingTransferUiStatus.RECEIVING -> when {
+            state.cancelRequested -> stringResource(R.string.transfer_canceling)
+            state.stage == LiveStage.FINALIZING -> stringResource(R.string.transfer_saving)
+            state.stage == LiveStage.TRANSFERRING -> stringResource(R.string.transfer_receiving)
+            else -> stringResource(R.string.transfer_status_peer, statusLabel, state.senderName)
         }
-
-        IncomingTransferUiStatus.RECEIVING -> if (isText) {
-            stringResource(R.string.incoming_receiving_text_summary, state.senderName)
-        } else {
-            pluralStringResource(
-                R.plurals.incoming_receiving_summary,
-                state.fileCount,
-                state.fileCount,
-                state.senderName,
-            )
-        }
-
-        IncomingTransferUiStatus.SUCCESS,
-        IncomingTransferUiStatus.PARTIAL -> if (isText) {
-            stringResource(R.string.incoming_received_text_summary, state.senderName)
-        } else {
-            pluralStringResource(
-                R.plurals.incoming_received_summary,
-                receivedCount,
-                receivedCount,
-                state.senderName,
-            )
-        }
-
+        IncomingTransferUiStatus.SUCCESS -> if (isText) stringResource(R.string.msg_copied_to_clipboard)
+            else stringResource(R.string.transfer_received_summary, incomingReceivedCountLabel(kind,
+                state.receivedFiles.size.takeIf { it > 0 } ?: state.fileCount),
+                state.senderName, incomingItemTypeLabel(kind))
+        IncomingTransferUiStatus.PARTIAL -> if (state.receivedFiles.isEmpty()) statusLabel
+            else stringResource(R.string.transfer_saved_partial, state.receivedFiles.size, state.fileCount)
         IncomingTransferUiStatus.FAILED,
-        IncomingTransferUiStatus.CANCELED -> stringResource(
-            R.string.incoming_transfer_from,
-            state.senderName,
-        )
-    }
-
-    val displayHeadline = when (state.status) {
-        IncomingTransferUiStatus.RECEIVING -> headline
-        else -> partyText
-    }
-
-    val supportingText = when (state.status) {
-        IncomingTransferUiStatus.REQUESTED -> listOfNotNull(
-            sizeLabel,
-            pluralStringResource(
-                R.plurals.incoming_receive_timeout_hint,
-                remainingSeconds,
-                remainingSeconds,
-            ),
-        ).joinToString(" · ")
-
-        IncomingTransferUiStatus.RECEIVING,
-        IncomingTransferUiStatus.SUCCESS -> null
-        IncomingTransferUiStatus.PARTIAL -> stringResource(R.string.recv_partial)
-
-        IncomingTransferUiStatus.FAILED,
-        IncomingTransferUiStatus.CANCELED -> state.errorMessage
-            ?: stringResource(R.string.noti_recv_interrupted)
+        IncomingTransferUiStatus.CANCELED -> stringResource(R.string.transfer_status_peer, statusLabel, state.senderName)
     }
 
     val visualState = when (state.status) {
         IncomingTransferUiStatus.REQUESTED -> TransferVisualState.FILE
-        IncomingTransferUiStatus.RECEIVING -> TransferVisualState.PROGRESS
-        IncomingTransferUiStatus.SUCCESS,
-        IncomingTransferUiStatus.PARTIAL -> TransferVisualState.SUCCESS
-        IncomingTransferUiStatus.FAILED,
-        IncomingTransferUiStatus.CANCELED -> TransferVisualState.FAILURE
+        IncomingTransferUiStatus.RECEIVING -> when {
+            state.cancelRequested -> TransferVisualState.FINALIZING
+            state.stage == LiveStage.PREPARING -> TransferVisualState.CONNECTING
+            state.stage == LiveStage.FINALIZING -> TransferVisualState.FINALIZING
+            else -> TransferVisualState.PROGRESS
+        }
+        IncomingTransferUiStatus.SUCCESS -> TransferVisualState.SUCCESS
+        IncomingTransferUiStatus.PARTIAL -> TransferVisualState.PARTIAL
+        IncomingTransferUiStatus.FAILED -> TransferVisualState.FAILURE
+        IncomingTransferUiStatus.CANCELED -> TransferVisualState.CANCELED
     }
 
     val secondaryActionLabel: String?
@@ -365,7 +383,7 @@ private fun IncomingTransferScreen(
         IncomingTransferUiStatus.RECEIVING -> {
             secondaryActionLabel = null
             onSecondaryAction = null
-            primaryActionLabel = stringResource(R.string.cancel)
+            primaryActionLabel = stringResource(R.string.cancel_transfer)
             onPrimaryAction = onCancel
         }
 
@@ -396,36 +414,70 @@ private fun IncomingTransferScreen(
     Box(modifier = Modifier.fillMaxSize()) {
         Box(
             modifier = Modifier
-                .fillMaxWidth()
-                .fillMaxHeight(0.42f)
+                .fillMaxSize()
                 .clickable(
                     interactionSource = interactionSource,
                     indication = null,
                     onClick = onDismiss,
-                ),
+                )
+                .clearAndSetSemantics {},
         )
         Box(modifier = Modifier.align(Alignment.BottomCenter)) {
             TransferSheet(
                 title = stringResource(R.string.app_name),
                 partyText = partyText,
                 partyIconRes = DeviceUtils.deviceIconById(state.brandId),
-                headlineText = displayHeadline,
-                supportingText = supportingText,
-                fileTypeLabel = fileTypeLabel(
-                    state.fileName,
-                    isText = isText,
-                    textLabel = stringResource(R.string.text_file_type),
-                    fallbackLabel = stringResource(R.string.generic_file_type),
-                ),
+                headlineText = "",
+                supportingText = null,
+                attachmentKind = kind,
                 visualState = visualState,
                 progress = state.progress.takeIf {
-                    state.status == IncomingTransferUiStatus.RECEIVING
+                    visualState == TransferVisualState.PROGRESS
                 },
                 secondaryActionLabel = secondaryActionLabel,
                 onSecondaryAction = onSecondaryAction,
                 primaryActionLabel = primaryActionLabel,
                 onPrimaryAction = onPrimaryAction,
+                primaryActionEnabled = state.status != IncomingTransferUiStatus.RECEIVING || cancelEnabled,
+                message = state.errorMessage?.takeIf { !state.cancelRequested && it != statusLabel },
+                emphasizePrimary = state.status != IncomingTransferUiStatus.RECEIVING,
+                onDismiss = onDismiss,
+                receivedFiles = state.receivedFiles,
             )
         }
     }
+}
+
+@Composable
+private fun incomingItemLabel(kind: AttachmentKind, count: Int): String =
+    if (kind == AttachmentKind.TEXT) stringResource(R.string.shared_text)
+    else pluralStringResource(when (kind) {
+        AttachmentKind.IMAGE -> R.plurals.transfer_images
+        AttachmentKind.VIDEO -> R.plurals.transfer_videos
+        else -> R.plurals.incoming_transfer_multiple
+    }, count, count)
+
+@Composable
+private fun incomingReceivedCountLabel(kind: AttachmentKind, count: Int): String =
+    pluralStringResource(if (kind == AttachmentKind.IMAGE)
+        R.plurals.transfer_image_count else R.plurals.transfer_file_count, count, count)
+
+@Composable
+private fun incomingItemTypeLabel(kind: AttachmentKind): String =
+    stringResource(when (kind) {
+        AttachmentKind.IMAGE -> R.string.transfer_image_type
+        AttachmentKind.VIDEO -> R.string.transfer_video_type
+        else -> R.string.transfer_file_type
+    })
+
+internal fun incomingCancelGuardRemainingMillis(enabledAtMillis: Long, elapsedRealtimeMillis: Long): Long =
+    if (enabledAtMillis > elapsedRealtimeMillis) enabledAtMillis - elapsedRealtimeMillis else 0L
+
+internal fun incomingTransferTitle(status: IncomingTransferUiStatus, stage: LiveStage = LiveStage.TRANSFERRING): Int = when (status) {
+    IncomingTransferUiStatus.REQUESTED -> LiveStage.WAITING_AUTH.titleResource(sending = false)
+    IncomingTransferUiStatus.RECEIVING -> stage.titleResource(sending = false)
+    IncomingTransferUiStatus.SUCCESS -> R.string.recv_ok
+    IncomingTransferUiStatus.PARTIAL -> R.string.recv_partial
+    IncomingTransferUiStatus.FAILED -> R.string.recv_fail
+    IncomingTransferUiStatus.CANCELED -> R.string.cancelled_by_user_local
 }

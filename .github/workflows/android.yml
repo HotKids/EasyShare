@@ -6,6 +6,12 @@ on:
       - main
   pull_request:
   workflow_dispatch:
+    inputs:
+      publish_release:
+        description: Publish a GitHub Release from main
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -114,7 +120,7 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_release && github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
     permissions:

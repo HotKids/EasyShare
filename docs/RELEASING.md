@@ -41,14 +41,14 @@ Gradle generates universal, arm64-v8a, and x86_64 APKs in one `assembleRelease` 
 
 Pull requests run Release unit tests, lint, Kotlin/resource compilation, and R8 without reading signing Secrets or generating an APK. Main and manual workflow runs retain the existing official signing process.
 
-## 自动创建 Release
+## Publish a Release
 
-1. 更新 `app/build.gradle.kts` 中的 `versionCode` 与 `versionName`。
-2. 确认 Pull Request 的 CI 通过。
-3. 将版本变更合并到 `main`。
+1. Update `versionCode` and `versionName` in `app/build.gradle.kts`.
+2. Verify CI and merge the approved changes into `main`.
+3. Manually run **Android CI** on `main` and select **Publish a GitHub Release from main**.
 
-`main` 的 Workflow 会读取 `versionName`，自动创建对应的 `v<versionName>` 标签，使用正式签名构建 APK，并发布 GitHub Release。同一版本的 Release 已存在时会安全跳过，不会重复发布。手动运行 Workflow 只构建并上传 artifact，不会创建 Release。
+Pushing to `main` runs verification and uploads signed APK artifacts without creating a tag or Release. Manual runs also build only by default. Release publication requires an explicit `publish_release: true` input on `main`; other branches cannot publish. The workflow reads `versionName`, creates the corresponding `v<versionName>` tag, and publishes the signed APKs. An existing Release for that version is skipped.
 
 新 Release 创建成功后，Workflow 会自动删除此前的 GitHub Releases 及其 `v<数字>` 发布标签，仓库只保留最新 Release 和当前版本标签。清理步骤不会在新 Release 创建失败时执行，也不会删除其他用途的标签。
 
-`main` 的发布任务不会取消正在运行的发布；如果短时间内连续推送多次，GitHub 可能用较新的等待任务替换较旧的等待任务，最终会以最新的 `main` 和 `versionName` 为准发布。
+Publishing runs are not canceled by later pushes. GitHub may replace an older queued run with a newer run on the same ref; the release job publishes only the commit selected by an explicitly requested publishing run.

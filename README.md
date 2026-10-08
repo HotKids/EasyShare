@@ -1,3 +1,5 @@
+![Easy Share](docs/images/hero.png)
+
 # Easy Share
 
 [![Android CI](https://github.com/HotKids/EasyShare/actions/workflows/android.yml/badge.svg)](https://github.com/HotKids/EasyShare/actions/workflows/android.yml)

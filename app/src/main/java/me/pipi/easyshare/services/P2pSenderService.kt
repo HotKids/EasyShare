@@ -412,7 +412,9 @@ class P2pSenderService : BaseP2pService() {
         super.onCreate()
         notificationManager = NotificationManagerCompat.from(this)
 
-        registerInternalBroadcastReceiver(internalReceiver, IntentFilter(ACTION_CANCEL_SENDING))
+        registerInternalBroadcastReceiver(internalReceiver, IntentFilter(ACTION_CANCEL_SENDING).apply {
+            addDataScheme("easyshare")
+        })
         internalReceiverRegistered = true
     }
 

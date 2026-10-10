@@ -33,8 +33,11 @@ object TransferUiCoordinator {
 
     @Synchronized
     fun requestCancel(taskId: Int, deviceId: String): Boolean {
-        if (!owns(taskId, deviceId) || _activePresentation.value == null) return false
+        if (!owns(taskId, deviceId) || _activePresentation.value == null || cancelRequested) return false
+        val current = _states.value[deviceId]?.takeIf { it.taskId == taskId } ?: return false
         cancelRequested = true
+        // Cleanup still owns the result; expose the accepted request before dispatching it.
+        _states.value = _states.value + (deviceId to current.copy(cancelRequested = true))
         return true
     }
 
@@ -55,7 +58,7 @@ object TransferUiCoordinator {
     fun publish(state: TransferUiState): Boolean {
         if (owner != null && !owns(state.taskId, state.deviceId)) return false
         if (owns(state.taskId, state.deviceId) && cancelRequested &&
-            (state.status == TransferUiStatus.SUCCESS || state.status == TransferUiStatus.PARTIAL)) return false
+            (state.status.isActive() || state.status == TransferUiStatus.SUCCESS || state.status == TransferUiStatus.PARTIAL)) return false
         val current = _states.value[state.deviceId]?.takeIf { it.taskId == state.taskId }
         if (current != null) {
             if (!current.status.isActive()) return false

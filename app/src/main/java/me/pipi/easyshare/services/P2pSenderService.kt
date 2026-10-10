@@ -171,6 +171,14 @@ internal fun outgoingFailureStatus(exception: Throwable?): TransferUiStatus = wh
     else -> TransferUiStatus.FAILED
 }
 
+internal fun cancelOutgoingJob(job: Job?, taskId: Int, deviceId: String): Boolean {
+    if (job == null || !job.isActive) return false
+    if (!TransferUiCoordinator.isCancelRequested(taskId, deviceId) &&
+        !TransferUiCoordinator.requestCancel(taskId, deviceId)) return false
+    job.cancel(CancelledByUserException(false))
+    return true
+}
+
 class P2pSenderService : BaseP2pService() {
     private val binder = LocalBinder()
     private val serviceJob = SupervisorJob()
@@ -300,6 +308,7 @@ class P2pSenderService : BaseP2pService() {
                 !TransferUiCoordinator.owns(taskId, task.device.id)) return@withContext
             val latest = TransferUiCoordinator.states.value[task.device.id]
             if (latest?.status != TransferUiStatus.WAITING && latest?.status != TransferUiStatus.SENDING) return@withContext
+            if (latest.cancelRequested) return@withContext
             LiveUpdateCoordinator.publishState("SENDER", state)
             updateForeground()
         }
@@ -1036,8 +1045,20 @@ class P2pSenderService : BaseP2pService() {
     fun cancel(taskId: Int, deviceId: String) {
         synchronized(currentTaskLock) {
             if (currentTaskId == taskId && currentDeviceId == deviceId &&
-                TransferUiCoordinator.requestCancel(taskId, deviceId)) {
-                currentJob?.cancel(CancelledByUserException(false))
+                cancelOutgoingJob(currentJob, taskId, deviceId)) {
+                val live = LiveUpdateCoordinator.state.value
+                if (live.taskKey == NotificationUtils.taskKey("send", taskId) && live.ongoing &&
+                    !terminalNotificationStarted && transferNotificationId != 0) {
+                    LiveUpdateCoordinator.publishState("SENDER", live.copy(
+                        title = getString(R.string.transfer_canceling), content = "",
+                        progress = -1, indeterminate = true, shortCriticalText = null, cancelIntent = null,
+                    ))
+                    try {
+                        updateForeground()
+                    } catch (error: Exception) {
+                        Log.w(TAG, "Unable to show send cancellation progress", error)
+                    }
+                }
             }
         }
     }

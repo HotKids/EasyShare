@@ -2,6 +2,7 @@ package me.pipi.easyshare
 
 import android.content.Intent
 import android.os.Bundle
+import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -14,11 +15,14 @@ import androidx.compose.runtime.getValue
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.core.content.FileProvider
+import androidx.core.net.toUri
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import me.pipi.easyshare.ui.main.MainScreen
 import me.pipi.easyshare.ui.main.MainViewModel
+import me.pipi.easyshare.ui.main.HomeReceiveRecovery
+import me.pipi.easyshare.ui.main.homeReceiveRecovery
 import me.pipi.easyshare.ui.theme.EasyShareTheme
 import me.pipi.easyshare.utils.missingTransferPermissions
 import java.io.File
@@ -26,16 +30,22 @@ import java.io.File
 class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels()
     private var enableReceiverAfterPermission = false
+    private var recoverReceiverAfterPermission = false
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) {
         val shouldEnable = enableReceiverAfterPermission
+        val shouldRecover = recoverReceiverAfterPermission
         enableReceiverAfterPermission = false
-        if (missingTransferPermissions(includeNotifications = true).isEmpty()) {
+        recoverReceiverAfterPermission = false
+        val missingPermissions = missingTransferPermissions(includeNotifications = true)
+        viewModel.refreshReceiveState()
+        if (missingPermissions.isEmpty()) {
             if (shouldEnable) viewModel.setReceiverEnabled(true)
-            viewModel.refreshRadioState()
             MyApplication.getInstance().reconcileReceiver()
+        } else if (shouldRecover && missingPermissions.any { !shouldShowRequestPermissionRationale(it) }) {
+            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, "package:$packageName".toUri()))
         } else if (shouldEnable) {
             Toast.makeText(
                 this,
@@ -48,6 +58,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableReceiverAfterPermission = savedInstanceState?.getBoolean(PENDING_RECEIVER_PERMISSION) ?: false
+        recoverReceiverAfterPermission = savedInstanceState?.getBoolean(PENDING_RECEIVER_RECOVERY) ?: false
         enableEdgeToEdge()
 
         setContent {
@@ -79,6 +90,7 @@ class MainActivity : ComponentActivity() {
                 MainScreen(
                     state = state,
                     onReceiverChanged = ::setReceiverEnabled,
+                    onRecoverReceive = ::recoverReceive,
                     onDeviceNameChanged = viewModel::setDeviceName,
                     onBrandChanged = viewModel::setBrand,
                     onChooseReceivePath = { chooseReceivePath.launch(null) },
@@ -96,12 +108,27 @@ class MainActivity : ComponentActivity() {
 
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putBoolean(PENDING_RECEIVER_PERMISSION, enableReceiverAfterPermission)
+        outState.putBoolean(PENDING_RECEIVER_RECOVERY, recoverReceiverAfterPermission)
         super.onSaveInstanceState(outState)
     }
 
     override fun onResume() {
         super.onResume()
-        viewModel.refreshRadioState()
+        viewModel.refreshReceiveState()
+    }
+
+    private fun recoverReceive() {
+        viewModel.refreshReceiveState()
+        when (homeReceiveRecovery(viewModel.state.value)) {
+            HomeReceiveRecovery.PERMISSIONS -> {
+                recoverReceiverAfterPermission = true
+                permissionLauncher.launch(missingTransferPermissions(includeNotifications = true).toTypedArray())
+            }
+            HomeReceiveRecovery.WIFI -> startActivity(Intent(Settings.Panel.ACTION_WIFI))
+            HomeReceiveRecovery.BLUETOOTH -> startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
+            HomeReceiveRecovery.RETRY -> MyApplication.getInstance().reconcileReceiver()
+            HomeReceiveRecovery.NONE -> Unit
+        }
     }
 
     private fun setReceiverEnabled(enabled: Boolean) {
@@ -159,5 +186,6 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         private const val PENDING_RECEIVER_PERMISSION = "pendingReceiverPermission"
+        private const val PENDING_RECEIVER_RECOVERY = "pendingReceiverRecovery"
     }
 }

@@ -1,7 +1,7 @@
 # Easy Share UI and transfer contract
 
 This document records the current UI implementation on local `main`.
-The approved application version is `1.0` (`versionCode = 5`). Integration does not
+The approved application version is `1.0.1` (`versionCode = 6`). Integration does not
 authorize a remote push, publication, or key replacement.
 Builds use only the Release variant and the existing official signing key.
 Missing signing inputs fail packaging; tests and compilation remain available.
@@ -10,15 +10,18 @@ CI does not unpack, modify, or re-sign either output.
 
 ## Home and settings
 
-- Preserve the approved dynamic-color hero artwork, size, and spacing.
+- Preserve the approved dynamic-color hero artwork, size, and spacing in regular
+  portrait windows. Below 480 dp of available height, limit artwork to one third
+  of that height and reduce its explanation spacing to keep controls reachable.
 - Keep all settings on Home. The six settings rows share an 84 dp minimum height
   and can grow for larger text. Group enhanced mode with secure transfer, and
   save location with debug logs.
 - Edit the brand through its icon and the device name through its name. Pixel
   uses the existing Google artwork; the device card follows the brand color.
 - Show `brand · current state` in the device card. Idle readiness depends on
-  Bluetooth and Wi-Fi, not the background-reception toggle. Do not add a
-  separate transfer-status row to Home.
+  permissions, Bluetooth, Wi-Fi, and confirmed advertising/GATT readiness, not
+  the background-reception toggle. Show a recovery action in the same position
+  when unavailable. Do not add a separate transfer-status row to Home.
 - Foreground reception remains available when background reception is off.
   Do not add an overlay-permission flow for the foreground half sheet.
 - Use the approved localized copy, Material typography roles, 12 dp separation
@@ -28,6 +31,9 @@ CI does not unpack, modify, or re-sign either output.
   control and artwork. Keep action ripples inside their rounded touch regions.
 - Use the Material title role in the app bar and inset setting dividers to the
   content alignment. Consume Scaffold padding before applying child insets.
+- Explain unavailable Shizuku access while keeping its switch disabled. Validate
+  trimmed device names before saving: require a nonempty value of at most 64
+  UTF-8 bytes, without silently replacing or truncating invalid input.
 
 ## Theme and typography
 
@@ -115,6 +121,8 @@ Material colors, dynamic palette, device artwork and task owners.
 - Discovery transitions to the selected outgoing task in the same sheet;
   showing a task from a notification remains a separate existing entry path.
   Neither a layout transition nor a copy change mutates protocol stages.
+- Discovery failures show Retry in the existing sheet and preserve the selected
+  files. Explanations that duplicate the primary status are omitted.
 - Retain the existing lifecycle-managed MDC 1.14 circular wavy indicator for
   active byte progress and finalization. Only accepted transfer progress shows
   a percentage, capped at 99 until the completion receipt/persistence boundary.
@@ -160,6 +168,9 @@ sheet is not a rejection, cancellation, or deadline extension.
   cancellation freezes progress and waits for storage cleanup to publish the
   actual saved-file outcome. The owner cleans up its active/busy state before
   admitting a new task.
+- Accepted outgoing cancellation immediately replaces progress with Canceling
+  in the sheet and notification, disables repeated cancellation, and retains
+  ownership until cleanup publishes the terminal outcome.
 - The optional large notification icon uses dedicated peer-brand artwork.
   Unknown brands and brands without dedicated artwork omit it; do not present
   the built-in Android fallback as a peer logo. Use the same artwork rule in
@@ -205,15 +216,14 @@ bitmaps, moves density-independent artwork without changing its bytes, uses
 plural resources for partial results, and removes API 31 checks that are always
 true at the current minimum SDK. AndroidViewModel supplies its Application
 through the existing getter. Backup rules explicitly retain the backup opt-out.
-The existing dependencies are updated to the current stable versions reported
-by lint. Stable AGP 9.4.1 still emits an upstream `Configuration.setVisible`
-deprecation with Gradle 9.8 (issue 560282299). AGP 9.5.0-alpha08 was tested and
-still emitted the same category of warning; the project retains stable AGP.
-The user subsequently requested official signed 1.0 packaging and Pixel
-installation for a two-day trial, with source synchronization to GitHub and no
-Release publication. Project lint is clean; the upstream AGP warning remains
-unresolved and must not be reported as cleared.
-The wrapper uses Gradle 9.8.0 with its official distribution SHA-256.
+The build pins AGP 9.5.0-alpha09 to include the upstream removal of
+`Configuration.setVisible` calls ([issue 565740572](https://developer.android.com/studio/releases/fixed-bugs/studio/2026.2.2)).
+This is a preview toolchain dependency: stable AGP 9.4.1 does not include the
+complete fix. Prefer a stable AGP release once it includes that fix, and validate
+toolchain changes with `--warning-mode=fail` so deprecations fail verification.
+The wrapper uses Gradle 9.8.1, its official distribution SHA-256, and the matching
+generated wrapper. Kotlin plugins share patch version 2.4.21. No deprecation
+logging is suppressed. Publication still requires an explicit release request.
 Duplicate Netty license notices are merged instead of discarded. Only the
 unused optional LZF/LZ4 decoder classes are excluded from forced Netty keeps;
 the existing HTTP, TLS and WebSocket pipelines retain their keep rules.
@@ -236,9 +246,14 @@ libraries under obsolete `armeabi`; excluding that directory during Gradle's
 native-library merge resolves the strip warnings while retaining supported
 ABIs. The same NDK and the SDK action fix are included in CI.
 
-AGP also warns that Netty's multiple native QUIC classifiers map to one
-dependency-report component. This affects dependency-report digests and has
-not been resolved; no dependency exclusion or warning suppression is added.
+Ktor 3.6 brings multiple native QUIC classifiers into its Netty dependency
+graph. The transfer server uses HTTPS and WSS over TCP and does not enable
+HTTP/3, so `netty-codec-native-quic` is excluded at the Ktor Netty dependency
+edge. HTTP/3 and QUIC Java classes remain available for Ktor's type references.
+This removes the unused native files that triggered AGP's multiple-file
+dependency-report warning without suppressing the report. Revisit this
+exclusion before enabling HTTP/3. `NettyTransferTransportTest` exercises a real
+Netty TLS listener, a certificate-pinned download, and a WSS message exchange.
 
 Source synchronization targets `codex/1.0-pixel-test`, whose push does not
 match the existing main-only publication workflow. No Release, tag, or manual

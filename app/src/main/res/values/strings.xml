@@ -50,6 +50,12 @@
     <string name="no_file_shared">No readable content to send was found</string>
     <string name="unknown">Unknown</string>
     <string name="device_name">Device name</string>
+    <string name="device_name_empty">Enter a device name</string>
+    <string name="device_name_too_long">Device name is too long</string>
+    <string name="home_receive_permissions_required">%1$s · Allow permissions to receive</string>
+    <string name="home_receive_not_ready">%1$s · Not ready to receive. Tap to retry</string>
+    <string name="nearby_scan_failed">Device discovery failed. Check Bluetooth and permissions, then try again.</string>
+    <string name="retry">Retry</string>
     <string name="log_capture_failed">Debug log creation failed</string>
     <string name="capture_logs">Debug log</string>
     <string name="capture_logs_desc">Create a debug log for troubleshooting</string>

@@ -73,8 +73,15 @@ import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.error
 import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -93,6 +100,7 @@ private val HomeItemMinHeight = 84.dp
 fun MainScreen(
     state: MainUiState,
     onReceiverChanged: (Boolean) -> Unit,
+    onRecoverReceive: () -> Unit,
     onDeviceNameChanged: (String) -> Unit,
     onBrandChanged: (Int) -> Unit,
     onChooseReceivePath: () -> Unit,
@@ -145,7 +153,7 @@ fun MainScreen(
         SettingsCard {
             NativeSettingItem(
                 title = enhancedModeLabel,
-                summary = stringResource(R.string.shizuku_desc),
+                summary = stringResource(if (state.shizukuAvailable) R.string.shizuku_desc else R.string.shizuku_unavailable),
                 enabled = state.shizukuAvailable,
                 checked = state.shizukuGranted,
                 onClick = { onEnhancedModeChanged(!state.shizukuGranted) },
@@ -204,6 +212,7 @@ fun MainScreen(
             modifier = Modifier.fillMaxSize().padding(contentPadding).consumeWindowInsets(contentPadding),
             contentAlignment = Alignment.TopCenter,
         ) {
+            val availableHeightDp = maxHeight.value
             if (usesTwoPaneHome(maxWidth.value, maxHeight.value)) {
                 Row(
                     modifier = Modifier
@@ -219,14 +228,12 @@ fun MainScreen(
                             .verticalScroll(introductionScrollState),
                         verticalArrangement = Arrangement.Center,
                     ) {
-                        AllianceIntroduction()
+                        AllianceIntroduction(availableHeightDp)
                         LocalDeviceCard(
-                            state.deviceName, state.effectiveBrandId, effectiveBrandName,
-                            wifiEnabled = state.wifiEnabled,
-                            bluetoothEnabled = state.bluetoothEnabled,
-                            transferStatus = state.transferStatus,
+                            state, effectiveBrandName,
                             onNameClick = { showNameDialog = true },
                             onBrandClick = { showBrandDialog = true },
+                            onRecoverReceive = onRecoverReceive,
                         )
                     }
                     LazyColumn(
@@ -250,15 +257,13 @@ fun MainScreen(
                         start = 24.dp, top = 12.dp, end = 24.dp, bottom = 34.dp,
                     ),
                 ) {
-                    item { AllianceIntroduction() }
+                    item { AllianceIntroduction(availableHeightDp) }
                     item {
                         LocalDeviceCard(
-                            state.deviceName, state.effectiveBrandId, effectiveBrandName,
-                            wifiEnabled = state.wifiEnabled,
-                            bluetoothEnabled = state.bluetoothEnabled,
-                            transferStatus = state.transferStatus,
+                            state, effectiveBrandName,
                             onNameClick = { showNameDialog = true },
                             onBrandClick = { showBrandDialog = true },
+                            onRecoverReceive = onRecoverReceive,
                         )
                     }
                     item {
@@ -277,12 +282,12 @@ internal fun usesTwoPaneHome(widthDp: Float, heightDp: Float): Boolean =
     widthDp >= 840f && heightDp >= 480f
 
 @Composable
-private fun AllianceIntroduction() {
+private fun AllianceIntroduction(availableHeightDp: Float) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        AllianceHero()
+        AllianceHero(availableHeightDp)
         Text(
             text = stringResource(R.string.compatibility_summary),
-            modifier = Modifier.fillMaxWidth().padding(vertical = 28.dp),
+            modifier = Modifier.fillMaxWidth().padding(vertical = if (availableHeightDp < 480f) 12.dp else 28.dp),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
@@ -292,20 +297,20 @@ private fun AllianceIntroduction() {
 
 @Composable
 private fun LocalDeviceCard(
-    deviceName: String,
-    brandId: Int,
+    state: MainUiState,
     brandName: String,
-    wifiEnabled: Boolean,
-    bluetoothEnabled: Boolean,
-    transferStatus: HomeTransferStatus?,
     onNameClick: () -> Unit,
     onBrandClick: () -> Unit,
+    onRecoverReceive: () -> Unit,
 ) {
+    val brandId = state.effectiveBrandId
+    val transferStatus = state.transferStatus
+    val canRecoverReceive = transferStatus == null && homeReceiveRecovery(state) != HomeReceiveRecovery.NONE
     val darkTheme = isSystemInDarkTheme()
     val colorRoles = remember(brandId, darkTheme) { brandCardColorRoles(brandId, darkTheme) }
     val contentColor = Color(colorRoles.onAccentContainer)
     val statusText = if (transferStatus == null) {
-        stringResource(receiveAvailabilityText(wifiEnabled, bluetoothEnabled), brandName)
+        stringResource(receiveAvailabilityText(state), brandName)
     } else {
         val description = if (transferStatus.progress == null) {
             stringResource(transferStatus.textRes)
@@ -344,23 +349,51 @@ private fun LocalDeviceCard(
                 )
             }
             Column(
-                Modifier.weight(1f).heightIn(min = 60.dp).clip(RoundedCornerShape(16.dp)).clickable(
-                    role = Role.Button,
-                    onClickLabel = stringResource(R.string.device_name),
-                    onClick = onNameClick,
-                ),
+                Modifier.weight(1f).heightIn(min = 60.dp)
+                    .then(if (!canRecoverReceive) Modifier.clip(RoundedCornerShape(16.dp)).clickable(
+                        role = Role.Button,
+                        onClickLabel = stringResource(R.string.device_name),
+                        onClick = onNameClick,
+                    ).semantics {
+                        stateDescription = statusText
+                        val progress = transferStatus?.progress
+                        if (progress != null) {
+                            progressBarRangeInfo = ProgressBarRangeInfo(progress / 100f, 0f..1f)
+                        } else {
+                            liveRegion = LiveRegionMode.Polite
+                        }
+                    } else Modifier),
                 verticalArrangement = Arrangement.Center,
             ) {
-                Text(
-                    text = deviceName,
-                    style = MaterialTheme.typography.titleMedium,
-                )
-                Text(
-                    text = statusText,
-                    modifier = Modifier.padding(top = 4.dp),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = contentColor,
-                )
+                Box(
+                    Modifier.fillMaxWidth().then(if (canRecoverReceive) Modifier.heightIn(min = 48.dp)
+                        .clip(RoundedCornerShape(12.dp)).clickable(
+                        role = Role.Button,
+                        onClickLabel = stringResource(R.string.device_name),
+                        onClick = onNameClick,
+                    ) else Modifier),
+                    contentAlignment = Alignment.CenterStart,
+                ) {
+                    Text(state.deviceName, style = MaterialTheme.typography.titleMedium)
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
+                        .then(if (canRecoverReceive) Modifier.heightIn(min = 48.dp)
+                            .clip(RoundedCornerShape(12.dp)).clickable(role = Role.Button, onClick = onRecoverReceive)
+                            .semantics(mergeDescendants = true) {
+                                liveRegion = LiveRegionMode.Polite
+                            }
+                        else Modifier.clearAndSetSemantics {}),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(statusText, modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodyMedium, color = contentColor)
+                    if (canRecoverReceive) {
+                        Icon(painterResource(R.drawable.ic_chevron_right), contentDescription = null,
+                            modifier = Modifier.size(20.dp))
+                    }
+                }
             }
         }
     }
@@ -368,13 +401,6 @@ private fun LocalDeviceCard(
 
 internal fun brandCardColorRoles(brandId: Int, darkTheme: Boolean): ColorRoles =
     MaterialColors.getColorRoles(DeviceUtils.devicePrimaryColorById(brandId), !darkTheme)
-
-internal fun receiveAvailabilityText(wifiEnabled: Boolean, bluetoothEnabled: Boolean): Int = when {
-    wifiEnabled && bluetoothEnabled -> R.string.brand_receive_ready
-    wifiEnabled -> R.string.brand_receive_bluetooth_off
-    bluetoothEnabled -> R.string.brand_receive_wifi_off
-    else -> R.string.brand_receive_radios_off
-}
 
 @Composable
 private fun ReceiveFilesCard(state: MainUiState, onReceiverChanged: (Boolean) -> Unit) {
@@ -481,9 +507,7 @@ private fun NativeSettingItem(
                 text = summary,
                 modifier = Modifier.padding(top = 4.dp),
                 style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.let {
-                    if (enabled) it else it.copy(alpha = 0.38f)
-                },
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
         if (trailing != null) {
@@ -506,7 +530,7 @@ private fun SettingDivider() {
 }
 
 @Composable
-private fun AllianceHero() {
+private fun AllianceHero(availableHeightDp: Float) {
     val darkTheme = isSystemInDarkTheme()
     // Keep decorative artwork lighter than controls, including monochrome palettes.
     val artworkColor = colorResource(android.R.color.system_accent1_200).toArgb()
@@ -523,7 +547,7 @@ private fun AllianceHero() {
         modifier = Modifier.fillMaxWidth(),
         contentAlignment = Alignment.TopCenter,
     ) {
-        val artworkScale = (maxWidth / 264.dp).coerceIn(0f, 1f)
+        val artworkScale = homeHeroArtworkScale(maxWidth.value, availableHeightDp)
         Box(Modifier.fillMaxWidth().height(312.dp * artworkScale), contentAlignment = Alignment.TopCenter) {
             Row(
                 modifier = Modifier.padding(top = 85.dp * artworkScale),
@@ -555,6 +579,13 @@ private fun AllianceHero() {
             )
         }
     }
+}
+
+internal fun homeHeroArtworkScale(widthDp: Float, availableHeightDp: Float): Float {
+    val widthScale = (widthDp / 264f).coerceIn(0f, 1f)
+    // Short windows reserve the rest of the viewport for identity and receive controls.
+    val heightScale = if (availableHeightDp < 480f) (availableHeightDp / 3f / 312f).coerceAtLeast(0f) else 1f
+    return minOf(widthScale, heightScale)
 }
 
 internal fun heroAnimationColorMatrix(color: Int, darkTheme: Boolean): FloatArray {
@@ -592,6 +623,12 @@ private fun DeviceNameDialog(
     var name by rememberSaveable(currentName) { mutableStateOf(currentName) }
     val focusRequester = remember { FocusRequester() }
     val deviceNameLabel = stringResource(R.string.device_name)
+    val validationMessage = when (deviceNameError(name)) {
+        DeviceNameError.EMPTY -> stringResource(R.string.device_name_empty)
+        DeviceNameError.TOO_LONG -> stringResource(R.string.device_name_too_long)
+        null -> null
+    }
+    val saveName = { if (validationMessage == null) onSave(name.trim()) }
     HomeSettingsSheet(deviceNameLabel, onDismiss) {
         Column(
             Modifier.fillMaxWidth().weight(1f, fill = false)
@@ -600,11 +637,14 @@ private fun DeviceNameDialog(
             OutlinedTextField(
                 value = name,
                 onValueChange = { name = it },
-                modifier = Modifier.fillMaxWidth().focusRequester(focusRequester),
+                modifier = Modifier.fillMaxWidth().focusRequester(focusRequester)
+                    .then(if (validationMessage != null) Modifier.semantics { error(validationMessage) } else Modifier),
                 label = { Text(deviceNameLabel) },
+                isError = validationMessage != null,
+                supportingText = if (validationMessage != null) { { Text(validationMessage) } } else null,
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                keyboardActions = KeyboardActions(onDone = { onSave(name) }),
+                keyboardActions = KeyboardActions(onDone = { saveName() }),
                 shape = RoundedCornerShape(16.dp),
             )
             LaunchedEffect(Unit) { focusRequester.requestFocus() }
@@ -613,7 +653,8 @@ private fun DeviceNameDialog(
             secondaryActionLabel = stringResource(R.string.cancel),
             onSecondaryAction = onDismiss,
             primaryActionLabel = stringResource(R.string.save),
-            onPrimaryAction = { onSave(name) },
+            onPrimaryAction = saveName,
+            primaryActionEnabled = validationMessage == null,
             emphasizePrimary = true,
         )
     }

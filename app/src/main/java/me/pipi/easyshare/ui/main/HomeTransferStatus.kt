@@ -32,6 +32,7 @@ internal fun homeTransferStatus(
         val task = outgoing.values.firstOrNull { NotificationUtils.taskKey("send", it.taskId) == live.taskKey }
         if (task != null && task.status != TransferUiStatus.WAITING && task.status != TransferUiStatus.SENDING) return null
         if (task != null) {
+            if (task.cancelRequested) return HomeTransferStatus(R.string.transfer_canceling)
             stage = task.stage
             actualProgress = task.progress
         }

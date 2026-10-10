@@ -32,8 +32,30 @@ class OutgoingTaskOwnerTest {
         TransferUiCoordinator.begin(task)
         assertTrue(TransferUiCoordinator.requestCancel(1, "peer"))
         assertTrue(TransferUiCoordinator.isCancelRequested(1, "peer"))
+        assertEquals(true, TransferUiCoordinator.states.value["peer"]?.cancelRequested)
         assertFalse(TransferUiCoordinator.requestCancel(1, "other-peer"))
         assertFalse(TransferUiCoordinator.isCancelRequested(2, "peer"))
+    }
+
+    @Test
+    fun repeatedCancelIsNotAcceptedAgain() {
+        TransferUiCoordinator.begin(task)
+        assertTrue(TransferUiCoordinator.requestCancel(1, "peer"))
+        assertFalse(TransferUiCoordinator.requestCancel(1, "peer"))
+    }
+
+    @Test
+    fun pendingCancelFreezesProgressUntilTheTerminalOutcome() {
+        TransferUiCoordinator.begin(task)
+        val sending = TransferUiState(1, "peer", TransferUiStatus.SENDING, 40, LiveStage.TRANSFERRING)
+        TransferUiCoordinator.publish(sending)
+        TransferUiCoordinator.requestCancel(1, "peer")
+        val canceling = TransferUiCoordinator.states.value["peer"]
+
+        assertFalse(TransferUiCoordinator.publish(sending.copy(progress = 70)))
+        assertEquals(canceling, TransferUiCoordinator.states.value["peer"])
+        assertTrue(TransferUiCoordinator.publish(sending.copy(status = TransferUiStatus.CANCELED)))
+        assertEquals(TransferUiStatus.CANCELED, TransferUiCoordinator.states.value["peer"]?.status)
     }
 
     @Test

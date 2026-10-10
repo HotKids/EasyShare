@@ -29,7 +29,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.ParcelUuid
 import android.os.SystemClock
 import android.util.Log
@@ -72,7 +74,10 @@ class GattServerService : Service() {
     private lateinit var btManager: BluetoothManager
     private var btAdvertiser: BluetoothLeAdvertiser? = null
 
-    private var advertisingSet: AdvertisingSet? = null
+    // Serialize Bluetooth completion with destruction so late callbacks cannot publish readiness.
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val readiness = ReceiverReadiness()
+    private val startupTimeout = Runnable { failStartup("BLE receiver startup timed out") }
     private var peerScanner: BluetoothLeScanner? = null
     private var peerCollectionId = 0L
     @Volatile
@@ -92,7 +97,7 @@ class GattServerService : Service() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
                 ServiceState.ACTION_QUERY_RECEIVER_STATE -> {
-                    context.sendBroadcast(ServiceState.getUpdateIntent(true))
+                    context.sendBroadcast(ServiceState.getUpdateIntent(readiness.isReady))
                 }
 
                 ServiceState.ACTION_STOP_SERVICE -> {
@@ -117,15 +122,15 @@ class GattServerService : Service() {
         override fun onAdvertisingSetStarted(
             advertisingSet: AdvertisingSet?, txPower: Int, status: Int
         ) {
-            if (status == ADVERTISE_SUCCESS) {
-                if (destroyed) {
+            mainHandler.post {
+                if (readiness.isStopped) {
                     runCatching { btAdvertiser?.stopAdvertisingSet(this) }
                         .onFailure { Log.w(TAG, "Failed to stop late BLE advertiser", it) }
+                } else if (status == ADVERTISE_SUCCESS && advertisingSet != null) {
+                    if (readiness.advertisingStarted()) receiverReady()
                 } else {
-                    this@GattServerService.advertisingSet = advertisingSet
+                    failStartup("Advertising failed: $status")
                 }
-            } else {
-                Log.e(TAG, "Advertising failed: $status")
             }
         }
     }
@@ -155,6 +160,17 @@ class GattServerService : Service() {
 
     @SuppressLint("MissingPermission")
     private val gattServerCallback = object : BluetoothGattServerCallback() {
+        override fun onServiceAdded(status: Int, service: BluetoothGattService) {
+            mainHandler.post {
+                if (readiness.isStopped || service.uuid != BleUtils.SERVICE_UUID) return@post
+                if (status == BluetoothGatt.GATT_SUCCESS) {
+                    if (readiness.serviceAdded()) receiverReady()
+                } else {
+                    failStartup("GATT service registration failed: $status")
+                }
+            }
+        }
+
         override fun onCharacteristicReadRequest(
             device: BluetoothDevice,
             requestId: Int,
@@ -441,17 +457,28 @@ class GattServerService : Service() {
             }
         }
 
-        startAdv()
-        startPeerScan()
-
         registerInternalBroadcastReceiver(internalReceiver, IntentFilter().apply {
             addAction(ServiceState.ACTION_QUERY_RECEIVER_STATE)
             addAction(ServiceState.ACTION_STOP_SERVICE)
             addAction(MyApplication.ACTION_BACKGROUND_RECEIVE_CHANGED)
         })
         internalReceiverRegistered = true
-        sendBroadcast(ServiceState.getUpdateIntent(true))
+        mainHandler.postDelayed(startupTimeout, RECEIVER_START_TIMEOUT_MS)
+        if (startAdv()) startPeerScan()
+    }
+
+    private fun receiverReady() {
+        mainHandler.removeCallbacks(startupTimeout)
         MyApplication.getInstance().onReceiverServiceStarted()
+        sendBroadcast(ServiceState.getUpdateIntent(true))
+    }
+
+    private fun failStartup(message: String, error: Exception? = null) {
+        if (readiness.isStopped) return
+        Log.e(TAG, message, error)
+        readiness.stop()
+        mainHandler.removeCallbacks(startupTimeout)
+        stopSelf()
     }
 
     private fun createNotification(): Notification {
@@ -484,8 +511,12 @@ class GattServerService : Service() {
         return START_STICKY
     }
 
-    fun startAdv() {
-        val advertiser = btAdvertiser ?: return
+    @SuppressLint("MissingPermission")
+    private fun startAdv(): Boolean {
+        val advertiser = btAdvertiser ?: run {
+            failStartup("BLE advertiser unavailable")
+            return false
+        }
         val localBrandId = DeviceUtils.getLocalBrandId()
         val bleBrandId = if (localBrandId == 114514) 114 else localBrandId
 
@@ -523,17 +554,20 @@ class GattServerService : Service() {
             setTxPowerLevel(1)
         }.build()
 
-        try {
+        return try {
             advertiser.startAdvertisingSet(
                 params, advData, scanRespData, null, null, 0, 0, advSetCallback
             )
 
-            gattServer = btManager.openGattServer(this, gattServerCallback).apply {
-                addService(buildGattService())
+            val server = checkNotNull(btManager.openGattServer(this, gattServerCallback)) {
+                "GATT server unavailable"
             }
-        } catch (e: SecurityException) {
-            Log.e(TAG, "Got SecurityException when trying to advertise", e)
-            stopSelf()
+            gattServer = server
+            check(server.addService(buildGattService())) { "GATT service registration rejected" }
+            true
+        } catch (e: Exception) {
+            failStartup("Failed to start BLE receiver", e)
+            false
         }
     }
 
@@ -566,6 +600,8 @@ class GattServerService : Service() {
     @SuppressLint("MissingPermission")
     override fun onDestroy() {
         destroyed = true
+        readiness.stop()
+        mainHandler.removeCallbacks(startupTimeout)
         IncomingPeerIdentity.stopCollection(peerCollectionId)
         try {
             peerScanner?.stopScan(peerScanCallback)
@@ -584,9 +620,6 @@ class GattServerService : Service() {
         } catch (e: Exception) {
             Log.e(TAG, "Failed to stop advertising", e)
         }
-        advertisingSet = null
-
-
         try {
             gattServer?.close()
         } catch (e: Exception) {
@@ -613,6 +646,7 @@ class GattServerService : Service() {
     }
 
     companion object {
+        private const val RECEIVER_START_TIMEOUT_MS = 10_000L
         private const val MAX_GATT_PAYLOAD_BYTES = BleUtils.MAX_P2P_GATT_PAYLOAD_BYTES
         private const val MAX_PENDING_GATT_DEVICES = 8
         private const val GATT_WRITE_TIMEOUT_MS = 30_000L

@@ -4,9 +4,18 @@ import me.pipi.easyshare.R
 import me.pipi.easyshare.incomingTransferTitle
 import me.pipi.easyshare.models.IncomingTransferUiStatus
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class TransferSheetTextTest {
+    @Test
+    fun explanationsDoNotRepeatTheStatusButKeepActionableDetails() {
+        assertNull(transferSheetExplanation("Transfer timed out", "Transfer timed out"))
+        assertNull(transferSheetExplanation("Transfer timed out", "  "))
+        assertNull(transferSheetExplanation("Transfer timed out", null))
+        assertEquals("Check the other device", transferSheetExplanation("Transfer timed out", "Check the other device"))
+    }
+
     @Test
     fun receiveTitleReflectsEveryStateWithoutEmbeddingSenderIdentity() {
         val expected = mapOf(

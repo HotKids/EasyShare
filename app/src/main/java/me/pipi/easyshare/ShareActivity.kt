@@ -43,12 +43,14 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -251,7 +253,9 @@ fun ShareActivityContent(
 ) {
     val context = LocalContext.current
     var selectedTransfer by rememberSaveable { mutableStateOf(initialTransfer) }
-    val discoveredDevices = if (selectedTransfer == null) deviceScanner() else emptyList()
+    var scanAttempt by remember { mutableIntStateOf(0) }
+    val discovery = if (selectedTransfer == null) deviceScanner(scanAttempt) else NearbyDeviceScan()
+    val discoveredDevices = discovery.devices
     val transferStates by TransferUiCoordinator.states.collectAsState()
     var savedResult by rememberSaveable { mutableStateOf(fallbackState) }
     val selectedState = selectedTransfer?.let { transfer ->
@@ -292,7 +296,12 @@ fun ShareActivityContent(
                 onDismiss = onDone,
             ) {
                 if (selectedTransfer == null) {
-                    if (discoveredDevices.isEmpty()) {
+                    if (discovery.failed) {
+                        TransferSheetBody(partyText = stringResource(R.string.nearby_scan_failed)) {
+                            Icon(painterResource(R.drawable.ic_warning), null,
+                                tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(40.dp))
+                        }
+                    } else if (discoveredDevices.isEmpty()) {
                         EmptyDeviceState()
                     } else {
                         BoxWithConstraints(
@@ -335,10 +344,11 @@ fun ShareActivityContent(
                         }
                     }
                     EasyShareSheetActions(
-                        secondaryActionLabel = null,
-                        onSecondaryAction = null,
-                        primaryActionLabel = stringResource(R.string.cancel),
-                        onPrimaryAction = onDone,
+                        secondaryActionLabel = if (discovery.failed) stringResource(R.string.cancel) else null,
+                        onSecondaryAction = if (discovery.failed) onDone else null,
+                        primaryActionLabel = stringResource(if (discovery.failed) R.string.retry else R.string.cancel),
+                        onPrimaryAction = { if (discovery.failed) scanAttempt++ else onDone() },
+                        emphasizePrimary = discovery.failed,
                     )
                 } else {
                     val transfer = checkNotNull(selectedTransfer)
@@ -388,9 +398,7 @@ private fun ColumnScope.OutgoingTransferSheet(
     val context = LocalContext.current
     val status = state?.status ?: TransferUiStatus.WAITING
     val inProgress = status == TransferUiStatus.WAITING || status == TransferUiStatus.SENDING
-    val statusLabel = stringResource(
-        if (status == TransferUiStatus.WAITING) R.string.noti_connecting else outgoingTransferTitle(state),
-    )
+    val statusLabel = stringResource(outgoingTransferTitle(state))
     val visualState = outgoingTransferVisual(state)
     val message = when (status) {
         TransferUiStatus.PARTIAL -> stringResource(R.string.noti_send_partial_body)
@@ -409,12 +417,15 @@ private fun ColumnScope.OutgoingTransferSheet(
         onSecondaryAction = null,
         primaryActionLabel = stringResource(if (inProgress) R.string.cancel else R.string.close),
         onPrimaryAction = if (inProgress) onCancel else onDone,
+        primaryActionEnabled = !inProgress || state?.cancelRequested != true,
         message = message,
         emphasizePrimary = false,
     )
 }
 
-internal fun outgoingTransferTitle(state: TransferUiState?): Int = when (state?.status ?: TransferUiStatus.WAITING) {
+internal fun outgoingTransferTitle(state: TransferUiState?): Int = if (state?.cancelRequested == true) {
+    R.string.transfer_canceling
+} else when (state?.status ?: TransferUiStatus.WAITING) {
     TransferUiStatus.WAITING -> (state?.stage ?: LiveStage.INIT).titleResource(sending = true)
     TransferUiStatus.SENDING -> (state?.stage ?: LiveStage.TRANSFERRING).titleResource(sending = true)
     TransferUiStatus.SUCCESS -> R.string.send_ok
@@ -426,7 +437,9 @@ internal fun outgoingTransferTitle(state: TransferUiState?): Int = when (state?.
     TransferUiStatus.UNCONFIRMED -> R.string.device_status_unconfirmed
 }
 
-internal fun outgoingTransferVisual(state: TransferUiState?): TransferVisualState = when (state?.status ?: TransferUiStatus.WAITING) {
+internal fun outgoingTransferVisual(state: TransferUiState?): TransferVisualState = if (state?.cancelRequested == true) {
+    TransferVisualState.FINALIZING
+} else when (state?.status ?: TransferUiStatus.WAITING) {
     TransferUiStatus.WAITING -> TransferVisualState.FILE
     TransferUiStatus.SENDING -> if (state?.stage == LiveStage.FINALIZING) TransferVisualState.FINALIZING else TransferVisualState.PROGRESS
     TransferUiStatus.SUCCESS -> TransferVisualState.SUCCESS
@@ -488,18 +501,25 @@ private fun DeviceGridItem(
 
 @SuppressLint("MissingPermission")
 @Composable
-fun deviceScanner(): List<DiscoveredDevice> {
+private fun deviceScanner(attempt: Int): NearbyDeviceScan {
     val context = LocalContext.current
-    var discoveredDevices by remember { mutableStateOf(emptyList<DiscoveredDevice>()) }
+    var discovery by remember(attempt) { mutableStateOf(NearbyDeviceScan()) }
 
-    LifecycleResumeEffect(context) {
+    LifecycleResumeEffect(context, attempt) {
         val manager = context.getSystemService(BluetoothManager::class.java)
         val adapter = manager.adapter
         val devicesLock = Any()
+        var active = true
+        discovery = discovery.copy(failed = false)
+
+        fun failScan() = synchronized(devicesLock) {
+            if (active) discovery = discovery.copy(failed = true)
+        }
 
         val callback = object : ScanCallback() {
             override fun onScanFailed(errorCode: Int) {
                 Log.e(TAG, "BLE scan failed: $errorCode")
+                failScan()
             }
 
             override fun onScanResult(callbackType: Int, result: ScanResult) {
@@ -550,7 +570,8 @@ fun deviceScanner(): List<DiscoveredDevice> {
                 )
                 var replaced = false
                 synchronized(devicesLock) {
-                    val newList = discoveredDevices.map {
+                    if (!active || discovery.failed) return
+                    val newList = discovery.devices.map {
                         if (it.id == senderId) {
                             replaced = true
                             newDevice
@@ -561,31 +582,35 @@ fun deviceScanner(): List<DiscoveredDevice> {
                     if (!replaced) {
                         newList.add(newDevice)
                     }
-                    discoveredDevices = newList
+                    discovery = discovery.copy(devices = newList)
                 }
             }
         }
 
         var startedScanner: BluetoothLeScanner? = null
 
-        if (adapter != null) {
-            val scanner = adapter.bluetoothLeScanner
+        try {
+            val scanner = adapter?.bluetoothLeScanner
             val filters = listOf(
                 ScanFilter.Builder().setServiceUuid(ParcelUuid(BleUtils.ADV_SERVICE_UUID)).build()
             )
             val settings =
                 ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build()
 
-            try {
-                scanner?.startScan(filters, settings, callback)
+            if (scanner == null) {
+                failScan()
+            } else {
+                scanner.startScan(filters, settings, callback)
                 startedScanner = scanner
                 Log.d(TAG, "Started scanning")
-            } catch (e: SecurityException) {
-                Log.e(TAG, "Failed to start scan", e)
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start scan", e)
+            failScan()
         }
 
         onPauseOrDispose {
+            synchronized(devicesLock) { active = false }
             try {
                 startedScanner?.stopScan(callback)
                 Log.d(TAG, "Stopped scanning")
@@ -595,5 +620,10 @@ fun deviceScanner(): List<DiscoveredDevice> {
         }
     }
 
-    return discoveredDevices
+    return discovery
 }
+
+private data class NearbyDeviceScan(
+    val devices: List<DiscoveredDevice> = emptyList(),
+    val failed: Boolean = false,
+)

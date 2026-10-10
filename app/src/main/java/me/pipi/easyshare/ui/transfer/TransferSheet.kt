@@ -158,8 +158,8 @@ fun ColumnScope.TransferSheetBody(
                 color = MaterialTheme.colorScheme.onSurface, textAlign = TextAlign.Center,
                 modifier = Modifier.weight(1f, fill = false).semantics { liveRegion = LiveRegionMode.Polite })
         }
-        if (!message.isNullOrBlank()) {
-            Text(message, style = MaterialTheme.typography.bodyMedium, textAlign = TextAlign.Center,
+        transferSheetExplanation(partyText, message)?.let { explanation ->
+            Text(explanation, style = MaterialTheme.typography.bodyMedium, textAlign = TextAlign.Center,
                 color = if (visualState in listOf(TransferVisualState.FAILURE, TransferVisualState.PARTIAL))
                     MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.fillMaxWidth().padding(top = 12.dp)
@@ -178,6 +178,9 @@ fun ColumnScope.TransferSheetBody(
         }
     }
 }
+
+internal fun transferSheetExplanation(status: String, message: String?): String? =
+    message?.takeIf { it.isNotBlank() && it != status }
 
 @Composable
 fun ColumnScope.TransferSheetContent(

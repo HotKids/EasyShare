@@ -8,6 +8,15 @@ import org.junit.Test
 
 class OutgoingSnapshotSerializationTest {
     @Test
+    fun pendingCancellationSurvivesSnapshotsAndDefaultsOffForOlderSnapshots() {
+        val state = TransferUiState(1, "peer", TransferUiStatus.SENDING, 40,
+            LiveStage.TRANSFERRING, cancelRequested = true)
+        assertEquals(state, Json.decodeFromString<TransferUiState>(Json.encodeToString(state)))
+        assertEquals(false, Json.decodeFromString<TransferUiState>(
+            """{"taskId":1,"deviceId":"peer","status":"SENDING"}""").cancelRequested)
+    }
+
+    @Test
     fun missingNameProvenanceSurvivesThePresentationSnapshot() {
         val presentation = OutgoingTransferPresentation(1, "peer", "Device", 130,
             "shared_file", "application/octet-stream", 1, 50, false, nameIsFallback = true)

@@ -69,6 +69,15 @@ class TransferPresentationTest {
     }
 
     @Test
+    fun pendingCancelReplacesWaitingAndSendingProgressWithoutClaimingAResult() {
+        for (status in listOf(TransferUiStatus.WAITING, TransferUiStatus.SENDING)) {
+            val state = TransferUiState(1, "peer", status, 40, LiveStage.TRANSFERRING, cancelRequested = true)
+            assertEquals(R.string.transfer_canceling, outgoingTransferTitle(state))
+            assertEquals(TransferVisualState.FINALIZING, outgoingTransferVisual(state))
+        }
+    }
+
+    @Test
     fun metadataDistinguishesTextMissingNamesAndMultipleFiles() {
         assertEquals(AttachmentKind.TEXT, attachmentKind("", null, true, 1))
         assertEquals(AttachmentKind.FILE, attachmentKind("", null, false, 1))

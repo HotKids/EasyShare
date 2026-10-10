@@ -100,6 +100,14 @@ class HomeTransferStatusTest {
     }
 
     @Test
+    fun cancellationReplacesThePreviousPercentageWhileTheSenderStops() {
+        val task = TransferUiState(7, "peer", TransferUiStatus.SENDING,
+            progress = 36, stage = LiveStage.TRANSFERRING, cancelRequested = true)
+        assertEquals(HomeTransferStatus(R.string.transfer_canceling), homeTransferStatus(
+            live(true, LiveStage.TRANSFERRING, 36), emptyMap(), mapOf("peer" to task)))
+    }
+
+    @Test
     fun terminalDomainStatesHideOldOngoingPresentationImmediately() {
         IncomingTransferUiStatus.entries.filter {
             it != IncomingTransferUiStatus.REQUESTED && it != IncomingTransferUiStatus.RECEIVING
@@ -152,7 +160,9 @@ class HomeTransferStatusTest {
         assertEquals(IncomingRequestDecision.TIMED_OUT,
             IncomingTransferUiCoordinator.awaitDecision(7, nowMillis = 201L))
         assertNull(projection.first())
-        assertEquals(R.string.brand_receive_ready, receiveAvailabilityText(true, true))
-        assertEquals(R.string.brand_receive_bluetooth_off, receiveAvailabilityText(true, false))
+        val ready = MainUiState(wifiEnabled = true, bluetoothEnabled = true, receiverRunning = true,
+            receivePermissionsGranted = true)
+        assertEquals(R.string.brand_receive_ready, receiveAvailabilityText(ready))
+        assertEquals(R.string.brand_receive_bluetooth_off, receiveAvailabilityText(ready.copy(bluetoothEnabled = false)))
     }
 }

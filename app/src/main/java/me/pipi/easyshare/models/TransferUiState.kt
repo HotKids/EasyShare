@@ -27,4 +27,5 @@ data class TransferUiState(
     val progress: Int = 0,
     val stage: LiveStage = LiveStage.INIT,
     val errorMessage: String? = null,
+    val cancelRequested: Boolean = false,
 ) : Parcelable

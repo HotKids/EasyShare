@@ -148,10 +148,10 @@ jobs:
           )"
           test -n "$version_name"
           test "$(printf '%s\n' "$version_name" | wc -l)" -eq 1
+          grep -Fxq "## $version_name" CHANGELOG.md
           printf 'tag=v%s\n' "$version_name" >> "$GITHUB_OUTPUT"
 
       - name: Create version tag and GitHub Release
-        id: publish
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
@@ -162,7 +162,6 @@ jobs:
           if gh release view "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Release $RELEASE_TAG already exists; skipping publication."
-            echo "published=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -197,49 +196,5 @@ jobs:
             release/SHA256SUMS \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
-            --generate-notes \
+            --notes-file CHANGELOG.md \
             --title "Easy Share $RELEASE_TAG"
-
-          echo "published=true" >> "$GITHUB_OUTPUT"
-
-      - name: Remove previous releases and release tags
-        if: steps.publish.outputs.published == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CURRENT_TAG: ${{ steps.version.outputs.tag }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          releases="$(
-            gh api \
-              --paginate \
-              "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
-              --jq '.[] | [.id, .tag_name] | @tsv'
-          )"
-
-          while IFS=$'\t' read -r release_id release_tag; do
-            if [[ -n "$release_id" && "$release_tag" != "$CURRENT_TAG" ]]; then
-              echo "Removing previous release: $release_tag"
-              gh api \
-                --method DELETE \
-                "repos/$GITHUB_REPOSITORY/releases/$release_id"
-            fi
-          done <<< "$releases"
-
-          release_tags="$(
-            gh api \
-              --paginate \
-              "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v?per_page=100" \
-              --jq '.[].ref'
-          )"
-
-          while IFS= read -r tag_ref; do
-            tag_name="${tag_ref#refs/tags/}"
-            if [[ -n "$tag_name" && "$tag_name" =~ ^v[0-9] &&
-              "$tag_name" != "$CURRENT_TAG" ]]; then
-              echo "Removing previous release tag: $tag_name"
-              gh api \
-                --method DELETE \
-                "repos/$GITHUB_REPOSITORY/git/refs/${tag_ref#refs/}"
-            fi
-          done <<< "$release_tags"

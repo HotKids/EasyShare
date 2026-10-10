@@ -23,7 +23,6 @@ import me.pipi.easyshare.AppSettings
 import me.pipi.easyshare.MyApplication
 import me.pipi.easyshare.R
 import me.pipi.easyshare.utils.DeviceUtils
-import me.pipi.easyshare.utils.BleUtils
 import me.pipi.easyshare.utils.IncomingTransferUiCoordinator
 import me.pipi.easyshare.utils.LiveUpdateCoordinator
 import me.pipi.easyshare.utils.TransferUiCoordinator
@@ -31,6 +30,7 @@ import me.pipi.easyshare.utils.ServiceState
 import me.pipi.easyshare.utils.ShizukuUtils
 import me.pipi.easyshare.utils.TAG
 import me.pipi.easyshare.utils.getReceiverFlags
+import me.pipi.easyshare.utils.missingTransferPermissions
 import me.pipi.easyshare.utils.registerInternalBroadcastReceiver
 import rikka.shizuku.Shizuku
 
@@ -39,6 +39,7 @@ data class MainUiState(
     val receiverRunning: Boolean = false,
     val wifiEnabled: Boolean = false,
     val bluetoothEnabled: Boolean = false,
+    val receivePermissionsGranted: Boolean = false,
     val busy: Boolean = false,
     val transferStatus: HomeTransferStatus? = null,
     val deviceName: String = "Android",
@@ -62,6 +63,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             receiverRunning = MyApplication.getInstance().receiverRunning,
             wifiEnabled = isWifiEnabled(),
             bluetoothEnabled = isBluetoothEnabled(),
+            receivePermissionsGranted = context.missingTransferPermissions(includeNotifications = true).isEmpty(),
             busy = MyApplication.getInstance().getBusy(),
             deviceName = settings.deviceName,
             configuredBrandId = settings.brandId,
@@ -179,13 +181,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setReceiverEnabled(enabled: Boolean) {
         MyApplication.getInstance().setBackgroundReceiveEnabled(enabled)
         _state.value = _state.value.copy(receiverEnabled = enabled)
-        refreshRadioState()
+        refreshReceiveState()
     }
 
-    fun refreshRadioState() {
+    fun refreshReceiveState() {
         _state.value = _state.value.copy(
             wifiEnabled = isWifiEnabled(),
             bluetoothEnabled = isBluetoothEnabled(),
+            receivePermissionsGranted = context.missingTransferPermissions(includeNotifications = true).isEmpty(),
+            receiverRunning = MyApplication.getInstance().receiverRunning,
         )
     }
 
@@ -202,7 +206,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setDeviceName(name: String) {
-        val safeName = BleUtils.normalizeDeviceName(name)
+        if (deviceNameError(name) != null) return
+        val safeName = name.trim()
         settings.deviceName = safeName
         _state.value = _state.value.copy(deviceName = safeName)
         MyApplication.getInstance().refreshReceiverIdentity()

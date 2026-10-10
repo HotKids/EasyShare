@@ -34,8 +34,8 @@ android {
         applicationId = "me.pipi.easyshare"
         minSdk = 31
         targetSdk = 37
-        versionCode = 5
-        versionName = "1.0"
+        versionCode = 6
+        versionName = "1.0.1"
     }
 
     signingConfigs {
@@ -138,6 +138,17 @@ kotlin {
     }
 }
 
+configurations.configureEach {
+    if (name == "releaseUnitTestCompileClasspath" || name == "releaseUnitTestRuntimeClasspath") {
+        resolutionStrategy.eachDependency {
+            // Local transport tests run on a JVM without Android's logging implementation.
+            if (requested.group == "com.squareup.okhttp3" && requested.name == "okhttp") {
+                useTarget("${requested.group}:okhttp-jvm:${requested.version}")
+            }
+        }
+    }
+}
+
 dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
@@ -156,7 +167,11 @@ dependencies {
     implementation(libs.ktor.client.okhttp)
     implementation(libs.ktor.client.websockets)
     implementation(libs.ktor.server.core)
-    implementation(libs.ktor.server.netty)
+    implementation(libs.ktor.server.netty) {
+        // Transfers use HTTPS/WSS over TCP. Keep Ktor's QUIC Java types for linkage,
+        // but omit unused native classifiers unless HTTP/3 is explicitly enabled.
+        exclude(group = "io.netty", module = "netty-codec-native-quic")
+    }
     implementation(libs.ktor.server.websockets)
     implementation(libs.ktor.network.tls.certificates)
 
@@ -172,4 +187,5 @@ dependencies {
     implementation(libs.libpag)
 
     testImplementation(libs.junit4)
+    testRuntimeOnly(libs.slf4j.jdk14)
 }

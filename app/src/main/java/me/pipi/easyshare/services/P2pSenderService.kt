@@ -1049,10 +1049,8 @@ class P2pSenderService : BaseP2pService() {
                 val live = LiveUpdateCoordinator.state.value
                 if (live.taskKey == NotificationUtils.taskKey("send", taskId) && live.ongoing &&
                     !terminalNotificationStarted && transferNotificationId != 0) {
-                    LiveUpdateCoordinator.publishState("SENDER", live.copy(
-                        title = getString(R.string.transfer_canceling), content = "",
-                        progress = -1, indeterminate = true, shortCriticalText = null, cancelIntent = null,
-                    ))
+                    LiveUpdateCoordinator.publishState("SENDER",
+                        NotificationUtils.cancelingState(live, getString(R.string.transfer_canceling)))
                     try {
                         updateForeground()
                     } catch (error: Exception) {
@@ -1081,13 +1079,16 @@ class P2pSenderService : BaseP2pService() {
             }
             .setContentIntent(taskContentIntent(task))
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-            .setOnlyAlertOnce(true)
-            .setSilent(true)
+            .setOnlyAlertOnce(false)
+            .setSilent(false)
             .setOngoing(false)
             .setRequestPromotedOngoing(false)
     }
 
     private fun createFailedNotification(task: TaskInfo, exception: Throwable?): Notification {
+        val status = outgoingFailureStatus(exception)
+        val locallyCanceled = TransferUiCoordinator.isCancelRequested(task.id, task.device.id) ||
+            status == TransferUiStatus.CANCELED
         val content = when (exception) {
             is UnconfirmedTransferException -> getString(R.string.error_send_timeout_confirmation)
             is ExceptionWithMessage -> exception.getMessage(this)
@@ -1096,13 +1097,15 @@ class P2pSenderService : BaseP2pService() {
             } else {
                 getString(R.string.cancelled_by_user_local)
             }
-            else -> getString(if (outgoingFailureStatus(exception) == TransferUiStatus.TIMEOUT)
+            else -> getString(if (status == TransferUiStatus.TIMEOUT)
                 R.string.device_status_timeout else R.string.noti_send_interrupted)
         }
         return createNotificationBuilder(task, R.drawable.ic_warning)
+            .setOnlyAlertOnce(locallyCanceled)
+            .setSilent(locallyCanceled)
             .let {
                 NotificationUtils.setTransferCopy(this, it, getString(me.pipi.easyshare.outgoingTransferTitle(
-                    TransferUiState(task.id, task.device.id, outgoingFailureStatus(exception)),
+                    TransferUiState(task.id, task.device.id, status),
                 )), content)
             }
             .setSubText(task.device.displayName)

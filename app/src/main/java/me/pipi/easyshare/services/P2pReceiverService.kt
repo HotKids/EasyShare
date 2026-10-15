@@ -122,6 +122,9 @@ import javax.net.ssl.SSLContext
 import kotlin.math.min
 import kotlin.random.Random
 
+internal fun incomingFailureStatus(exception: Throwable?): IncomingTransferUiStatus =
+    if (exception is CancelledByUserException) IncomingTransferUiStatus.CANCELED else IncomingTransferUiStatus.FAILED
+
 class P2pReceiverService : BaseP2pService() {
     private lateinit var notificationManager: NotificationManagerCompat
     private val serviceJob = SupervisorJob()
@@ -233,6 +236,7 @@ class P2pReceiverService : BaseP2pService() {
         withContext(Dispatchers.Main.immediate) {
             if (!NotificationUtils.canPublishTransferNotification(taskId, currentTaskId, terminalNotificationStarted)) return@withContext
             val latest = IncomingTransferUiCoordinator.get(taskId)
+            if (latest?.cancelRequested == true) return@withContext
             if (latest != null && latest.status != IncomingTransferUiStatus.REQUESTED &&
                 latest.status != IncomingTransferUiStatus.RECEIVING) return@withContext
             LiveUpdateCoordinator.publishState("RECEIVER", state)
@@ -592,6 +596,7 @@ class P2pReceiverService : BaseP2pService() {
         contentIntent: PendingIntent?,
     ): Notification {
         val presentation = IncomingTransferUiCoordinator.get(taskId)
+        val alertUser = presentation?.cancelRequested != true
         val mainCopyOnly = !isPartial && receivedFiles.isNotEmpty() && presentation?.isText != true
         val title = if (mainCopyOnly) {
             val item = TransferCopy.itemLabel(this, receivedFiles.first().name,
@@ -613,6 +618,9 @@ class P2pReceiverService : BaseP2pService() {
         val builder =
             createNotificationBuilder(R.drawable.ic_arrow_circle_down, contentIntent,
                 presentation?.brandId)
+                // Completion replaces the progress notification and must be allowed to alert again.
+                .setOnlyAlertOnce(!alertUser)
+                .setSilent(!alertUser)
                 .let {
                     NotificationUtils.setTransferCopy(this, it, title, if (mainCopyOnly) null else content)
                 }
@@ -659,9 +667,10 @@ class P2pReceiverService : BaseP2pService() {
         taskId: Int, exception: Throwable?, contentIntent: PendingIntent?, peerBrandId: Int?,
     ): Notification {
         val state = IncomingTransferUiCoordinator.get(taskId) ?: IncomingTransferUiState(
-            taskId, getString(R.string.device), null, "", 1, 0L, IncomingTransferUiStatus.FAILED,
-            errorMessage = getString(R.string.noti_recv_interrupted),
+            taskId, getString(R.string.device), null, "", 1, 0L, incomingFailureStatus(exception),
         )
+        val canceledLocally = state.cancelRequested ||
+            (exception is CancelledByUserException && !exception.isRemote)
         val content = state.errorMessage ?: if (exception != null && exception is ExceptionWithMessage) {
             exception.getMessage(this)
         } else if (exception != null && exception is CancelledByUserException) {
@@ -678,6 +687,8 @@ class P2pReceiverService : BaseP2pService() {
             if (state.isText) viewerPendingIntent(state, manualResult = true) else contentIntent,
             state.brandId ?: peerBrandId,
         )
+            .setOnlyAlertOnce(canceledLocally)
+            .setSilent(canceledLocally)
             .let {
                 NotificationUtils.setTransferCopy(this, it,
                     getString(me.pipi.easyshare.incomingTransferTitle(state.status, state.stage)), content)
@@ -848,19 +859,24 @@ class P2pReceiverService : BaseP2pService() {
                             context = this@P2pReceiverService,
                             state = requestState,
                         )
-                        observeRequest(localTaskId, contentIntent)
-
-                        withContext(Dispatchers.Main) {
+                        val sheetLaunched = withContext(Dispatchers.Main) {
                             if (MyApplication.getInstance().hasVisibleActivity()) {
+                                updateStage(localTaskId, senderDisplayName, LiveStage.WAITING_AUTH,
+                                    contentIntent = contentIntent)
                                 try {
                                     startActivity(incomingIntent)
+                                    true
                                 } catch (error: SecurityException) {
                                     Log.w(TAG, "Incoming sheet launch denied; keeping notification controls", error)
+                                    false
                                 } catch (error: android.content.ActivityNotFoundException) {
                                     Log.w(TAG, "Incoming sheet unavailable; keeping notification controls", error)
+                                    false
                                 }
-                            }
+                            } else false
                         }
+                        if (sheetLaunched) IncomingTransferUiCoordinator.awaitRequestPresentation(localTaskId)
+                        observeRequest(localTaskId, contentIntent)
 
                         val userResponse = IncomingTransferUiCoordinator.awaitDecision(localTaskId)
 
@@ -1292,6 +1308,17 @@ class P2pReceiverService : BaseP2pService() {
                 if (state != null && !IncomingTransferUiCoordinator.cancelReceiving(
                     taskId, getString(R.string.cancelled_by_user_local),
                 )) return
+                val live = LiveUpdateCoordinator.state.value
+                if (live.taskKey == NotificationUtils.taskKey("receive", taskId) && live.ongoing &&
+                    !terminalNotificationStarted && transferNotificationId != 0) {
+                    LiveUpdateCoordinator.publishState("RECEIVER",
+                        NotificationUtils.cancelingState(live, getString(R.string.transfer_canceling)))
+                    try {
+                        updateForeground()
+                    } catch (error: Exception) {
+                        Log.w(TAG, "Unable to show receive cancellation progress", error)
+                    }
+                }
                 currentJob?.cancel(CancelledByUserException(false))
             }
         }

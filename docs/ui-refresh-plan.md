@@ -155,7 +155,7 @@ sheet is not a rejection, cancellation, or deadline extension.
   count. Partial/text/saving/failed notifications retain their existing details.
 - NotificationCompat remains responsible for the system layout. Short chips
   retain brief stages/actual percentages; expanded phrases are not forced into
-  the chip. No custom RemoteViews or notification lifecycle change is introduced.
+  the chip. No custom RemoteViews are used.
 - Foreground receive requests use the half sheet. Background Accept and Decline
   dispatch directly to the receive owner without starting an activity.
 - The half sheet and live update represent the same task. Hiding the sheet does
@@ -164,6 +164,19 @@ sheet is not a rejection, cancellation, or deadline extension.
 - Keep one notification identity through consent, transfer, saving, and the
   terminal result. Terminal updates are neither ongoing nor promoted; they do
   not automatically reopen the half sheet.
+- Send and receive completion, partial results, and unexpected failures alert
+  once when they replace progress, subject to notification permissions, channel
+  settings, and system interruption policy. Local cancellation and rejection
+  stay silent, including partial files retained after local cancellation.
+  Results remain ordinary dismissible notifications after the system hides the
+  heads-up; there is no delayed repost or move to a separate silent channel.
+- A foreground receive request first posts silent notification actions while
+  its half sheet opens. The service waits at most one second for actual sheet
+  visibility before falling back to one arrival alert. Showing then hiding the
+  sheet does not replay that alert. Background requests alert immediately.
+- Notification bodies omit a reason when it repeats the status. Additional
+  failure details remain visible. Receive cancellation before request metadata
+  arrives is still presented as cancellation, not a receive failure.
 - Terminal outcomes reject late progress and completion writes. A receive
   cancellation freezes progress and waits for storage cleanup to publish the
   actual saved-file outcome. The owner cleans up its active/busy state before
@@ -171,6 +184,8 @@ sheet is not a rejection, cancellation, or deadline extension.
 - Accepted outgoing cancellation immediately replaces progress with Canceling
   in the sheet and notification, disables repeated cancellation, and retains
   ownership until cleanup publishes the terminal outcome.
+- Accepted incoming cancellation follows the same notification transition;
+  late progress cannot restore the percentage while storage cleanup is pending.
 - The optional large notification icon uses dedicated peer-brand artwork.
   Unknown brands and brands without dedicated artwork omit it; do not present
   the built-in Android fallback as a peer logo. Use the same artwork rule in

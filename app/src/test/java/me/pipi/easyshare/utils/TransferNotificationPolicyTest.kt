@@ -10,6 +10,38 @@ import org.junit.Test
 
 class TransferNotificationPolicyTest {
     @Test
+    fun terminalCopyKeepsAdditionalDetailsWithoutRepeatingTheResult() {
+        assertEquals("Transfer canceled", NotificationUtils.transferNotificationBody("Transfer canceled", "Transfer canceled"))
+        assertEquals("Transfer timed out", NotificationUtils.transferNotificationBody("Transfer timed out", null))
+        assertEquals("Sent", NotificationUtils.transferNotificationBody("Sent", " "))
+        assertEquals("Receive failed\nStorage is full", NotificationUtils.transferNotificationBody("Receive failed", "Storage is full"))
+    }
+
+    @Test
+    fun cancellationDropsProgressAndAlertsWhileKeepingTaskIdentity() {
+        val previous = LiveUpdateState(
+            taskKey = "receive:42", channelId = NotificationUtils.RECEIVER_CHAN_ID,
+            peerBrandId = 130, title = "Receiving", content = "photo.jpg",
+            progress = 67, shortCriticalText = "67%", silent = false, alertOnlyOnce = false,
+            ongoing = true, promoted = true,
+        )
+        val canceling = NotificationUtils.cancelingState(previous, "Canceling")
+        assertEquals("Canceling", canceling.title)
+        assertEquals("", canceling.content)
+        assertEquals(-1, canceling.progress)
+        assertNull(canceling.shortCriticalText)
+        assertNull(canceling.cancelIntent)
+        assertTrue(canceling.indeterminate)
+        assertTrue(canceling.silent)
+        assertTrue(canceling.alertOnlyOnce)
+        assertEquals(previous.taskKey, canceling.taskKey)
+        assertEquals(previous.channelId, canceling.channelId)
+        assertEquals(previous.peerBrandId, canceling.peerBrandId)
+        assertTrue(canceling.ongoing)
+        assertTrue(canceling.promoted)
+    }
+
+    @Test
     fun preparationConsentAndSavingShowTheAttachmentInsteadOfRepeatingTheStageTitle() {
         listOf(LiveStage.INIT, LiveStage.PREPARING, LiveStage.HANDSHAKE,
             LiveStage.REQUESTED, LiveStage.WAITING_AUTH, LiveStage.FINALIZING).forEach { stage ->

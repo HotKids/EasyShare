@@ -2,6 +2,7 @@ package me.pipi.easyshare.utils
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
@@ -171,6 +172,54 @@ class IncomingTransferUiCoordinatorTest {
         IncomingTransferUiCoordinator.show(taskId, this)
         assertFalse(IncomingTransferUiCoordinator.takeRequestAlert(taskId, 100L))
         IncomingTransferUiCoordinator.hide(taskId, this)
+        assertFalse(IncomingTransferUiCoordinator.takeRequestAlert(taskId, 101L))
+    }
+
+    @Test
+    fun quicklyHiddenRequestDoesNotAlertBeforeItsObserverStarts() {
+        beginRequest()
+        IncomingTransferUiCoordinator.show(taskId, this)
+        IncomingTransferUiCoordinator.hide(taskId, this)
+
+        assertFalse(IncomingTransferUiCoordinator.takeRequestAlert(taskId, 100L))
+    }
+
+    @Test
+    fun presentationWaitEndsWhenTheSheetAcknowledgesVisibility() = runBlocking {
+        beginRequest()
+        val presentation = async(start = CoroutineStart.UNDISPATCHED) {
+            IncomingTransferUiCoordinator.awaitRequestPresentation(taskId)
+        }
+        assertFalse(presentation.isCompleted)
+
+        IncomingTransferUiCoordinator.show(taskId, this)
+
+        assertTrue(presentation.await())
+        assertFalse(IncomingTransferUiCoordinator.takeRequestAlert(taskId, 100L))
+    }
+
+    @Test
+    fun presentationTimeoutKeepsOneArrivalAlertAndTheRequestActions() = runBlocking {
+        beginRequest()
+
+        assertFalse(IncomingTransferUiCoordinator.awaitRequestPresentation(taskId, timeoutMillis = 1L))
+        assertTrue(IncomingTransferUiCoordinator.takeRequestAlert(taskId, 100L))
+        assertFalse(IncomingTransferUiCoordinator.takeRequestAlert(taskId, 101L))
+        assertTrue(IncomingTransferUiCoordinator.decide(taskId, IncomingRequestDecision.ACCEPTED, 102L))
+        assertEquals(IncomingRequestDecision.ACCEPTED, IncomingTransferUiCoordinator.awaitDecision(taskId, 103L))
+    }
+
+    @Test
+    fun presentationWaitEndsWhenTheNotificationDecidesTheRequest() = runBlocking {
+        beginRequest()
+        val presentation = async(start = CoroutineStart.UNDISPATCHED) {
+            IncomingTransferUiCoordinator.awaitRequestPresentation(taskId)
+        }
+        assertFalse(presentation.isCompleted)
+
+        assertTrue(IncomingTransferUiCoordinator.decide(taskId, IncomingRequestDecision.REJECTED, 100L))
+
+        assertTrue(presentation.await())
         assertFalse(IncomingTransferUiCoordinator.takeRequestAlert(taskId, 101L))
     }
 

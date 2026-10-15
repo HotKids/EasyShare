@@ -59,6 +59,17 @@ class OutgoingTaskOwnerTest {
     }
 
     @Test
+    fun acceptedCancellationSurvivesATimeoutResultUntilCleanup() {
+        TransferUiCoordinator.begin(task)
+        assertTrue(TransferUiCoordinator.requestCancel(1, "peer"))
+        assertTrue(TransferUiCoordinator.publish(TransferUiState(1, "peer", TransferUiStatus.TIMEOUT)))
+        assertFalse(TransferUiCoordinator.states.value.getValue("peer").cancelRequested)
+        assertTrue(TransferUiCoordinator.isCancelRequested(1, "peer"))
+        assertTrue(TransferUiCoordinator.finish(1, "peer"))
+        assertFalse(TransferUiCoordinator.isCancelRequested(1, "peer"))
+    }
+
+    @Test
     fun terminalResultRetainsOwnershipUntilCleanupButIsNotAnActiveHomeEntry() {
         TransferUiCoordinator.begin(task)
         val result = TransferUiState(1, "peer", TransferUiStatus.SUCCESS, 100, LiveStage.COMPLETED)

@@ -6,6 +6,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
 import me.pipi.easyshare.models.IncomingTransferUiState
 import me.pipi.easyshare.models.IncomingTransferUiStatus
@@ -176,6 +177,15 @@ object IncomingTransferUiCoordinator {
 
     fun getActive(): IncomingTransferUiState? = _states.value.values.lastOrNull { !it.status.isTerminal() }
 
+    suspend fun awaitRequestPresentation(taskId: Int, timeoutMillis: Long = 1_000L): Boolean =
+        withTimeoutOrNull(timeoutMillis) {
+            states.first { current ->
+                val state = current[taskId]
+                state == null || state.status != IncomingTransferUiStatus.REQUESTED || !state.monitorInBackground
+            }
+            true
+        } ?: false
+
     @Synchronized
     fun takeRequestAlert(taskId: Int, nowMillis: Long = SystemClock.elapsedRealtime()): Boolean {
         val request = requests[taskId] ?: return false
@@ -208,8 +218,12 @@ object IncomingTransferUiCoordinator {
 
     @Synchronized
     fun show(taskId: Int, owner: Any): Boolean {
-        if (!_states.value.containsKey(taskId)) return false
+        val state = _states.value[taskId] ?: return false
         visibleSheets.getOrPut(taskId) { mutableSetOf() }.add(owner)
+        if (state.status == IncomingTransferUiStatus.REQUESTED) {
+            // Visibility may end before the notification observer collects the first state.
+            requests[taskId]?.arrivalAlerted = true
+        }
         return setBackgroundMonitoring(taskId, false)
     }
 

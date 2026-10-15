@@ -123,6 +123,15 @@ object NotificationUtils {
     internal fun canPublishTransferNotification(taskId: Int, ownerTaskId: Int?, terminalStarted: Boolean): Boolean =
         taskId == ownerTaskId && !terminalStarted
 
+    internal fun cancelingState(state: LiveUpdateState, title: String): LiveUpdateState = state.copy(
+        title = title, content = "", progress = -1, indeterminate = true,
+        shortCriticalText = null, cancelIntent = null, acceptIntent = null, rejectIntent = null,
+        silent = true, alertOnlyOnce = true,
+    )
+
+    internal fun transferNotificationBody(title: String, content: String?): String =
+        if (content.isNullOrBlank() || content == title) title else "$title\n$content"
+
     internal fun dismissLiveUpdate(taskKey: String) {
         // Dismissal changes this task's presentation, never its transfer or decision.
         promotionPolicy.dismiss(taskKey)
@@ -249,7 +258,7 @@ object NotificationUtils {
         title: String,
         content: String? = null,
     ): NotificationCompat.Builder {
-        val body = if (content.isNullOrBlank()) title else "$title\n$content"
+        val body = transferNotificationBody(title, content)
         // System templates discard size spans; transfer details use the native body style.
         return builder.setContentTitle(context.getString(R.string.app_name))
             .setContentText(body)

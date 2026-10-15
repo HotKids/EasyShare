@@ -18,6 +18,7 @@ import android.net.wifi.p2p.WifiP2pGroup
 import android.net.wifi.p2p.WifiP2pInfo
 import android.net.wifi.p2p.WifiP2pManager
 import android.os.Binder
+import android.os.SystemClock
 import android.util.Log
 import android.widget.Toast
 import androidx.annotation.DrawableRes
@@ -57,6 +58,9 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.select
@@ -89,6 +93,8 @@ import me.pipi.easyshare.utils.JsonWithUnknownKeys
 import me.pipi.easyshare.utils.LiveStage
 import me.pipi.easyshare.utils.LiveUpdateCoordinator
 import me.pipi.easyshare.utils.NotificationUtils
+import me.pipi.easyshare.utils.TRANSFER_COMPLETION_DISPLAY_MILLIS
+import me.pipi.easyshare.utils.awaitTransferCompletionDisplay
 import me.pipi.easyshare.utils.ProgressCounter
 import me.pipi.easyshare.utils.ShizukuUtils
 import me.pipi.easyshare.utils.TAG
@@ -194,7 +200,10 @@ class P2pSenderService : BaseP2pService() {
     private var currentDeviceId: String? = null
     private var transferNotificationId = 0
     private var terminalNotificationStarted = false
-    private var retainTransferNotification = false
+    private var completionForegroundId = 0
+    private var completionDisplayUntilMillis = 0L
+    private var completionNotification: Notification? = null
+    private var sheetVisibilityJob: Job? = null
 
     private suspend fun updateStage(
         task: TaskInfo,
@@ -315,29 +324,82 @@ class P2pSenderService : BaseP2pService() {
     }
 
     private fun updateForeground() {
+        val state = NotificationUtils.forSheetVisibility(
+            LiveUpdateCoordinator.state.value,
+            TransferUiCoordinator.isSheetVisible(currentTaskId ?: return, currentDeviceId ?: return),
+        )
         startForeground(
             transferNotificationId,
-            NotificationUtils.getCurrentLiveNotification(this),
+            NotificationUtils.buildNotificationFromState(this, state),
             ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
         )
     }
 
+    private fun observeSheetVisibility(task: TaskInfo) {
+        sheetVisibilityJob?.cancel()
+        sheetVisibilityJob = scope.launch(Dispatchers.Main.immediate) {
+            TransferUiCoordinator.sheetVisibility.map { TransferUiCoordinator.isSheetVisible(task.id, task.device.id) }
+                .distinctUntilChanged().drop(1).collect { visible ->
+                    if (currentTaskId != task.id || currentDeviceId != task.device.id) return@collect
+                    try {
+                        if (terminalNotificationStarted) {
+                            if (visible) completionNotification?.let {
+                                val quiet = NotificationUtils.quietNotification(this@P2pSenderService, it)
+                                completionNotification = quiet
+                                startForeground(completionForegroundId, quiet, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+                            }
+                        } else if (LiveUpdateCoordinator.state.value.taskKey == NotificationUtils.taskKey("send", task.id)) {
+                            updateForeground()
+                        }
+                    } catch (error: Exception) {
+                        Log.w(TAG, "Unable to update send notification visibility", error)
+                    }
+                }
+        }
+    }
+
+    @SuppressLint("MissingPermission")
     private suspend fun showTransferResult(task: TaskInfo, notification: Notification) =
         withContext(Dispatchers.Main.immediate + NonCancellable) {
             if (currentTaskId != task.id || terminalNotificationStarted) return@withContext
             terminalNotificationStarted = true
             if (transferNotificationId == 0) return@withContext
-            retainTransferNotification = try {
-                // Progress and result must use the same AMS queue before detaching the FGS flag.
-                startForeground(transferNotificationId, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-                stopForeground(android.app.Service.STOP_FOREGROUND_DETACH)
-                true
+            val sheetVisible = TransferUiCoordinator.isSheetVisible(task.id, task.device.id)
+            val result = if (sheetVisible) NotificationUtils.quietNotification(this@P2pSenderService, notification)
+                else notification
+            val status = TransferUiCoordinator.states.value[task.device.id]?.takeIf { it.taskId == task.id }?.status
+            val completed = status == TransferUiStatus.SUCCESS || status == TransferUiStatus.PARTIAL
+            try {
+                val resultId = NotificationUtils.newTransferNotificationId(this@P2pSenderService, transferNotificationId)
+                if (completed) {
+                    startForeground(resultId, result, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+                    completionForegroundId = resultId
+                    completionNotification = result
+                    completionDisplayUntilMillis = SystemClock.elapsedRealtime() + TRANSFER_COMPLETION_DISPLAY_MILLIS
+                    Log.i("TransferNotification", "direction=send id=$resultId event=completion_display_started sheetVisible=$sheetVisible")
+                } else {
+                    notificationManager.notify(resultId, result)
+                }
+                Log.i("TransferNotification", "direction=send id=$transferNotificationId resultId=$resultId event=result_posted")
             } catch (e: SecurityException) {
                 Log.w(TAG, "Notification permission unavailable for send result", e)
-                false
             } catch (e: Exception) {
                 Log.w(TAG, "Unable to show send result notification", e)
-                false
+            }
+            if (completed) {
+                LiveUpdateCoordinator.publishState("SENDER", LiveUpdateState(
+                    title = notification.extras.getCharSequence(Notification.EXTRA_TEXT)?.toString().orEmpty(),
+                    peerBrandId = task.device.brandId,
+                    stage = LiveStage.COMPLETED,
+                    isText = task.files.singleOrNull()?.textContent != null,
+                    priority = LiveUpdatePriority.CRITICAL,
+                    ongoing = false,
+                    taskKey = NotificationUtils.taskKey("send", task.id),
+                    channelId = NotificationUtils.SENDER_CHAN_ID,
+                    smallIcon = R.drawable.ic_arrow_circle_up,
+                    silent = sheetVisible,
+                    alertOnlyOnce = sheetVisible,
+                ))
             }
         }
 
@@ -951,7 +1013,9 @@ class P2pSenderService : BaseP2pService() {
         currentDeviceId = task.device.id
         transferNotificationId = 0
         terminalNotificationStarted = false
-        retainTransferNotification = false
+        completionForegroundId = 0
+        completionNotification = null
+        completionDisplayUntilMillis = 0L
 
         // Every admitted task must enter cleanup, even if canceled before IO dispatch.
         val job = scope.launch(Dispatchers.IO, start = CoroutineStart.ATOMIC) {
@@ -964,6 +1028,7 @@ class P2pSenderService : BaseP2pService() {
                 }
                 currentCoroutineContext().ensureActive()
                 updateStage(task, LiveStage.PREPARING)
+                withContext(Dispatchers.Main.immediate) { observeSheetVisibility(task) }
                 val completedFully = runTask(task)
                 updateStage(
                     task,
@@ -1012,14 +1077,25 @@ class P2pSenderService : BaseP2pService() {
                 }
             } finally {
                 withContext(NonCancellable + Dispatchers.Main) {
-                    synchronized(currentTaskLock) {
+                    awaitTransferCompletionDisplay(completionDisplayUntilMillis, SystemClock.elapsedRealtime())
+                    sheetVisibilityJob?.cancel()
+                    sheetVisibilityJob = null
+                    try {
                         if (currentTaskId == task.id && currentDeviceId == task.device.id) {
-                            val endingStartId = currentStartId ?: startId
-                            try {
-                                LiveUpdateCoordinator.clearState("SENDER")
-                                if (!retainTransferNotification) removeTransferNotification()
+                            LiveUpdateCoordinator.clearState("SENDER")
+                            if (completionForegroundId != 0) {
+                                stopForeground(android.app.Service.STOP_FOREGROUND_DETACH)
+                                Log.i("TransferNotification", "direction=send id=$completionForegroundId event=completion_detached")
+                                NotificationUtils.finalizeCompletionNotification(this@P2pSenderService, completionForegroundId)
+                            } else {
+                                removeTransferNotification()
+                            }
+                        }
+                    } finally {
+                        synchronized(currentTaskLock) {
+                            if (currentTaskId == task.id && currentDeviceId == task.device.id) {
+                                val endingStartId = currentStartId ?: startId
                                 NotificationUtils.releaseTask("send", task.id)
-                            } finally {
                                 currentTaskId = null
                                 currentStartId = null
                                 currentJob = null

@@ -1,6 +1,7 @@
 package me.pipi.easyshare.utils
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -16,11 +17,52 @@ import androidx.annotation.StringRes
 import androidx.core.app.NotificationChannelCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import me.pipi.easyshare.MainActivity
 import me.pipi.easyshare.R
 import me.pipi.easyshare.models.LiveUpdateState
 import java.util.concurrent.ConcurrentHashMap
+
+internal const val TRANSFER_COMPLETION_DISPLAY_MILLIS = 5_000L
+
+internal suspend fun awaitTransferCompletionDisplay(displayUntilMillis: Long, nowMillis: Long) {
+    // A peer closing the protocol must not shorten the already-published completion state.
+    withContext(NonCancellable) {
+        delay((displayUntilMillis - nowMillis).coerceAtLeast(0L))
+    }
+}
+
+@SuppressLint("InlinedApi")
+private const val COMPLETION_NON_ORDINARY_FLAGS = Notification.FLAG_FOREGROUND_SERVICE or
+    Notification.FLAG_NO_CLEAR or Notification.FLAG_ONGOING_EVENT or Notification.FLAG_PROMOTED_ONGOING
+private const val COMPLETION_ORDINARY_FLAGS = Notification.FLAG_AUTO_CANCEL or Notification.FLAG_ONLY_ALERT_ONCE
+
+internal fun ordinaryCompletionFlags(flags: Int): Int =
+    (flags and COMPLETION_NON_ORDINARY_FLAGS.inv()) or COMPLETION_ORDINARY_FLAGS
+
+internal enum class CompletionNotificationFinalization { NORMALIZED, ABSENT, TIMED_OUT }
+
+internal suspend fun finalizeCompletionNotificationState(
+    readFlags: () -> Int?,
+    updateIfPresent: () -> Boolean,
+    pause: suspend () -> Unit = { delay(100L) },
+): CompletionNotificationFinalization {
+    // DETACH crosses the AMS and NMS queues; a returned call is not a completed flag change.
+    repeat(11) { attempt ->
+        val flags = readFlags() ?: return CompletionNotificationFinalization.ABSENT
+        if (flags == ordinaryCompletionFlags(flags)) return CompletionNotificationFinalization.NORMALIZED
+        if (attempt == 10) return CompletionNotificationFinalization.TIMED_OUT
+        if (flags and Notification.FLAG_FOREGROUND_SERVICE == 0 && !updateIfPresent()) {
+            return CompletionNotificationFinalization.ABSENT
+        }
+        pause()
+    }
+    return CompletionNotificationFinalization.TIMED_OUT
+}
 
 @Serializable
 enum class LiveStage {
@@ -105,14 +147,15 @@ object NotificationUtils {
 
     fun taskKey(direction: String, taskId: Int): String = "$direction:$taskId"
 
-    internal fun availableTransferNotificationId(occupiedIds: Set<Int>): Int {
+    internal fun availableTransferNotificationId(occupiedIds: Set<Int>, reservedId: Int? = null): Int {
         var id = ID_RECEIVER_READY + 1
-        while (id in occupiedIds) id++
+        while (id in occupiedIds || id == reservedId) id++
         return id
     }
 
-    fun newTransferNotificationId(context: Context): Int = availableTransferNotificationId(
+    fun newTransferNotificationId(context: Context, reservedId: Int? = null): Int = availableTransferNotificationId(
         context.getSystemService(NotificationManager::class.java).activeNotifications.mapTo(mutableSetOf()) { it.id },
+        reservedId,
     )
 
     internal fun peerIconResource(state: LiveUpdateState): Int? = when (state.channelId) {
@@ -122,6 +165,53 @@ object NotificationUtils {
 
     internal fun canPublishTransferNotification(taskId: Int, ownerTaskId: Int?, terminalStarted: Boolean): Boolean =
         taskId == ownerTaskId && !terminalStarted
+
+    internal fun forSheetVisibility(state: LiveUpdateState, sheetVisible: Boolean): LiveUpdateState =
+        if (sheetVisible) state.copy(promoted = false, silent = true, alertOnlyOnce = true) else state
+
+    fun quietNotification(context: Context, notification: Notification): Notification =
+        NotificationCompat.Builder(context, notification)
+            .setSilent(true)
+            .setOnlyAlertOnce(true)
+            .setRequestPromotedOngoing(false)
+            .build()
+
+    @RequiresPermission(Manifest.permission.POST_NOTIFICATIONS)
+    suspend fun finalizeCompletionNotification(context: Context, id: Int) {
+        val manager = context.getSystemService(NotificationManager::class.java)
+        fun current() = manager.activeNotifications.firstOrNull { it.id == id && it.tag == null }?.notification
+        try {
+            val outcome = finalizeCompletionNotificationState(
+                readFlags = { current()?.flags },
+                updateIfPresent = {
+                    val active = current()
+                    if (active == null) {
+                        false
+                    } else {
+                        if (active.flags and Notification.FLAG_FOREGROUND_SERVICE == 0) {
+                            val ordinary = quietNotification(context, active).apply {
+                                flags = ordinaryCompletionFlags(flags)
+                            }
+                            manager.notify(id, ordinary)
+                        }
+                        true
+                    }
+                },
+            )
+            when (outcome) {
+                CompletionNotificationFinalization.NORMALIZED ->
+                    Log.i("TransferNotification", "id=$id event=completion_normalized")
+                CompletionNotificationFinalization.ABSENT ->
+                    Log.i("TransferNotification", "id=$id event=completion_absent")
+                CompletionNotificationFinalization.TIMED_OUT ->
+                    Log.w("TransferNotification", "id=$id event=completion_finalize_timeout")
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            Log.w("TransferNotification", "id=$id event=completion_finalize_failed", error)
+        }
+    }
 
     internal fun cancelingState(state: LiveUpdateState, title: String): LiveUpdateState = state.copy(
         title = title, content = "", progress = -1, indeterminate = true,

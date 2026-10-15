@@ -37,6 +37,7 @@
     <string name="recv_fail">接收失败</string>
     <string name="noti_receive_complete_body">文件已保存</string>
     <string name="sending">正在发送</string>
+    <string name="sending_in_background">正在后台发送</string>
     <string name="send_ok">发送完成</string>
     <string name="send_partial">部分文件发送完成</string>
     <string name="send_fail">发送失败</string>

@@ -1,6 +1,7 @@
 package me.pipi.easyshare
 
 import android.annotation.SuppressLint
+import android.app.Activity
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanCallback
@@ -69,6 +70,9 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LifecycleResumeEffect
+import androidx.lifecycle.compose.LifecycleStartEffect
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
 import me.pipi.easyshare.models.DiscoveredDevice
 import me.pipi.easyshare.models.FileInfo
 import me.pipi.easyshare.models.TaskInfo
@@ -253,6 +257,25 @@ fun ShareActivityContent(
 ) {
     val context = LocalContext.current
     var selectedTransfer by rememberSaveable { mutableStateOf(initialTransfer) }
+    val sheetOwner = remember { Any() }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LifecycleStartEffect(sheetOwner) {
+        selectedTransfer?.let { transfer ->
+            TransferUiCoordinator.showSheet(transfer.taskId, transfer.deviceId, sheetOwner)
+        }
+        onStopOrDispose {
+            selectedTransfer?.let { transfer ->
+                val hidden = TransferUiCoordinator.hideSheet(transfer.taskId, transfer.deviceId, sheetOwner)
+                val state = TransferUiCoordinator.states.value[transfer.deviceId]
+                    ?.takeIf { it.taskId == transfer.taskId }
+                if (hidden && !lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED) &&
+                    (context as? Activity)?.isChangingConfigurations != true &&
+                    shouldShowBackgroundSendingToast(state)) {
+                    Toast.makeText(context, R.string.sending_in_background, Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
     var scanAttempt by remember { mutableIntStateOf(0) }
     val discovery = if (selectedTransfer == null) deviceScanner(scanAttempt) else NearbyDeviceScan()
     val discoveredDevices = discovery.devices
@@ -329,6 +352,7 @@ fun ShareActivityContent(
                                         onClick = {
                                             val taskId = Random.nextInt()
                                             val task = TaskInfo(taskId, device, files)
+                                            TransferUiCoordinator.showSheet(taskId, device.id, sheetOwner)
                                             if (
                                                 P2pSenderService.startTaskChecked(
                                                     context,
@@ -336,6 +360,8 @@ fun ShareActivityContent(
                                                 )
                                             ) {
                                                 selectedTransfer = OutgoingTransferPresentation.from(task)
+                                            } else {
+                                                TransferUiCoordinator.hideSheet(taskId, device.id, sheetOwner)
                                             }
                                         },
                                     )
@@ -365,6 +391,10 @@ fun ShareActivityContent(
         }
     }
 }
+
+internal fun shouldShowBackgroundSendingToast(state: TransferUiState?): Boolean =
+    state != null && !state.cancelRequested &&
+        (state.status == TransferUiStatus.WAITING || state.status == TransferUiStatus.SENDING)
 
 internal fun restoredTransferState(
     transfer: OutgoingTransferPresentation,

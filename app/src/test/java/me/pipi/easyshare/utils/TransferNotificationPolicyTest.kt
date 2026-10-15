@@ -10,6 +10,31 @@ import org.junit.Test
 
 class TransferNotificationPolicyTest {
     @Test
+    fun visibleSheetSuppressesTheLivePopupAndAlertsWithoutChangingTheTransfer() {
+        val request = LiveUpdateState(taskKey = "receive:7", stage = LiveStage.WAITING_AUTH,
+            promoted = true, silent = false, alertOnlyOnce = false)
+        val foreground = NotificationUtils.forSheetVisibility(request, sheetVisible = true)
+        assertFalse(foreground.promoted)
+        assertTrue(foreground.silent)
+        assertTrue(foreground.alertOnlyOnce)
+        assertEquals(request.taskKey, foreground.taskKey)
+        assertEquals(request.stage, foreground.stage)
+        assertEquals(request, NotificationUtils.forSheetVisibility(request, sheetVisible = false))
+    }
+
+    @Test
+    fun closingTheSheetRestoresProgressPromotionWithoutAddingProgressAlerts() {
+        val progress = LiveUpdateState(taskKey = "send:8", stage = LiveStage.TRANSFERRING,
+            progress = 57, promoted = true, silent = true, alertOnlyOnce = true)
+        assertFalse(NotificationUtils.forSheetVisibility(progress, sheetVisible = true).promoted)
+        val background = NotificationUtils.forSheetVisibility(progress, sheetVisible = false)
+        assertTrue(background.promoted)
+        assertTrue(background.silent)
+        assertTrue(background.alertOnlyOnce)
+        assertEquals(57, background.progress)
+    }
+
+    @Test
     fun terminalCopyKeepsAdditionalDetailsWithoutRepeatingTheResult() {
         assertEquals("Transfer canceled", NotificationUtils.transferNotificationBody("Transfer canceled", "Transfer canceled"))
         assertEquals("Transfer timed out", NotificationUtils.transferNotificationBody("Transfer timed out", null))
@@ -224,6 +249,12 @@ class TransferNotificationPolicyTest {
         val second = NotificationUtils.availableTransferNotificationId(retainedIds + first)
         assertEquals(4, first)
         assertEquals(5, second)
+    }
+
+    @Test
+    fun resultNeverReusesItsForegroundIdEvenBeforeTheSystemPublishesIt() {
+        assertEquals(3, NotificationUtils.availableTransferNotificationId(emptySet(), reservedId = 2))
+        assertEquals(5, NotificationUtils.availableTransferNotificationId(setOf(1, 2, 3), reservedId = 4))
     }
 
     @Test

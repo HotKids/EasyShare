@@ -64,6 +64,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withContext
@@ -94,6 +95,8 @@ import me.pipi.easyshare.utils.LiveUpdateCoordinator
 import me.pipi.easyshare.utils.IncomingTransferUiCoordinator
 import me.pipi.easyshare.utils.IncomingRequestDecision
 import me.pipi.easyshare.utils.NotificationUtils
+import me.pipi.easyshare.utils.TRANSFER_COMPLETION_DISPLAY_MILLIS
+import me.pipi.easyshare.utils.awaitTransferCompletionDisplay
 import me.pipi.easyshare.utils.ProgressCounter
 import me.pipi.easyshare.utils.TAG
 import me.pipi.easyshare.utils.TransferLimitException
@@ -129,10 +132,14 @@ class P2pReceiverService : BaseP2pService() {
     private lateinit var notificationManager: NotificationManagerCompat
     private val serviceJob = SupervisorJob()
     private val scope = CoroutineScope(Dispatchers.Main + serviceJob)
-    private var retainTransferNotification = false
+    private var resultNotificationPosted = false
+    private var completionForegroundId = 0
+    private var completionNotification: Notification? = null
+    private var completionDisplayUntilMillis = 0L
     private var transferNotificationId = 0
     private var terminalNotificationStarted = false
     private var taskNotificationJob: Job? = null
+    private var sheetVisibilityJob: Job? = null
     private var lastNotificationStage: LiveStage? = null
 
     private suspend fun updateStage(
@@ -245,7 +252,10 @@ class P2pReceiverService : BaseP2pService() {
     }
 
     private fun updateForeground() {
-        val state = LiveUpdateCoordinator.state.value
+        val state = NotificationUtils.forSheetVisibility(
+            LiveUpdateCoordinator.state.value,
+            IncomingTransferUiCoordinator.get(currentTaskId ?: return)?.monitorInBackground == false,
+        )
         val notification = NotificationUtils.buildNotificationFromState(this, state)
         if (Build.VERSION.SDK_INT >= 37 && state.stage != null && state.stage != lastNotificationStage) {
             lastNotificationStage = state.stage
@@ -262,6 +272,29 @@ class P2pReceiverService : BaseP2pService() {
             notification,
             ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
         )
+    }
+
+    private fun observeSheetVisibility(taskId: Int) {
+        sheetVisibilityJob?.cancel()
+        sheetVisibilityJob = scope.launch(Dispatchers.Main.immediate) {
+            IncomingTransferUiCoordinator.states.map { it[taskId]?.monitorInBackground == false }
+                .distinctUntilChanged().drop(1).collect { visible ->
+                    if (currentTaskId != taskId) return@collect
+                    try {
+                        if (terminalNotificationStarted) {
+                            if (visible) completionNotification?.let {
+                                val quiet = NotificationUtils.quietNotification(this@P2pReceiverService, it)
+                                completionNotification = quiet
+                                startForeground(completionForegroundId, quiet, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+                            }
+                        } else if (LiveUpdateCoordinator.state.value.taskKey == NotificationUtils.taskKey("receive", taskId)) {
+                            updateForeground()
+                        }
+                    } catch (error: Exception) {
+                        Log.w(TAG, "Unable to update receive notification visibility", error)
+                    }
+                }
+        }
     }
 
     private fun viewerPendingIntent(state: IncomingTransferUiState, manualResult: Boolean = false): PendingIntent =
@@ -311,15 +344,31 @@ class P2pReceiverService : BaseP2pService() {
         }
     }
 
+    @SuppressLint("MissingPermission")
     private suspend fun showTransferResult(taskId: Int, notification: Notification) = withContext(Dispatchers.Main + NonCancellable) {
         if (currentTaskId != taskId || terminalNotificationStarted) return@withContext
         terminalNotificationStarted = true
         taskNotificationJob?.cancel()
         if (transferNotificationId == 0) return@withContext
-        retainTransferNotification = try {
-            // Progress and result must use the same AMS queue before detaching the FGS flag.
-            startForeground(transferNotificationId, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-            stopForeground(android.app.Service.STOP_FOREGROUND_DETACH)
+        val sheetVisible = IncomingTransferUiCoordinator.get(taskId)?.monitorInBackground == false
+        val result = if (sheetVisible) {
+            NotificationUtils.quietNotification(this@P2pReceiverService, notification)
+        } else notification
+        val completed = hasCompletedResult(taskId)
+        resultNotificationPosted = try {
+            val resultId = NotificationUtils.newTransferNotificationId(this@P2pReceiverService, transferNotificationId)
+            if (completed) {
+                // Keep the completion alert on the same foreground path as the request.
+                // Changing the foreground ID removes the old progress notification.
+                startForeground(resultId, result, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+                completionForegroundId = resultId
+                completionNotification = result
+                completionDisplayUntilMillis = SystemClock.elapsedRealtime() + TRANSFER_COMPLETION_DISPLAY_MILLIS
+                Log.i("TransferNotification", "direction=receive id=$resultId event=completion_display_started sheetVisible=$sheetVisible")
+            } else {
+                notificationManager.notify(resultId, result)
+            }
+            Log.i("TransferNotification", "direction=receive id=$transferNotificationId resultId=$resultId event=result_posted")
             true
         } catch (e: SecurityException) {
             Log.w(TAG, "Notification permission unavailable for receive result", e)
@@ -328,16 +377,33 @@ class P2pReceiverService : BaseP2pService() {
             Log.w(TAG, "Unable to show receive result notification", e)
             false
         }
+        if (completed) {
+            val presentation = IncomingTransferUiCoordinator.get(taskId)
+            LiveUpdateCoordinator.publishState("RECEIVER", LiveUpdateState(
+                title = notification.extras.getCharSequence(Notification.EXTRA_TEXT)?.toString().orEmpty(),
+                peerBrandId = presentation?.brandId,
+                stage = LiveStage.COMPLETED,
+                isText = presentation?.isText == true,
+                shortCriticalText = getString(R.string.stage_done),
+                priority = LiveUpdatePriority.CRITICAL,
+                ongoing = false,
+                taskKey = NotificationUtils.taskKey("receive", taskId),
+                contentIntent = notification.contentIntent,
+                channelId = NotificationUtils.RECEIVER_CHAN_ID,
+                smallIcon = R.drawable.ic_arrow_circle_down,
+                silent = sheetVisible || presentation?.cancelRequested == true,
+                alertOnlyOnce = sheetVisible || presentation?.cancelRequested == true,
+            ))
+        }
     }
 
     private fun removeTransferNotification() {
         stopForeground(android.app.Service.STOP_FOREGROUND_REMOVE)
         if (transferNotificationId != 0) notificationManager.cancel(transferNotificationId)
-        retainTransferNotification = false
     }
 
     private fun isExpectedCompletedSessionClose(error: Throwable): Boolean {
-        if (!retainTransferNotification) return false
+        if (!resultNotificationPosted) return false
         return generateSequence(error) { it.cause }.any {
             it is EOFException || it is ClosedReceiveChannelException
         }
@@ -456,7 +522,10 @@ class P2pReceiverService : BaseP2pService() {
         }
 
         val localTaskId = Random.nextInt()
-        retainTransferNotification = false
+        resultNotificationPosted = false
+        completionForegroundId = 0
+        completionNotification = null
+        completionDisplayUntilMillis = 0L
         transferNotificationId = 0
         terminalNotificationStarted = false
         val peerAddress = intent.getStringExtra(IncomingPeerIdentity.EXTRA_GATT_PEER_ADDRESS)
@@ -469,6 +538,7 @@ class P2pReceiverService : BaseP2pService() {
                     transferNotificationId = NotificationUtils.newTransferNotificationId(this@P2pReceiverService)
                 }
                 updateStage(localTaskId, getString(R.string.device), LiveStage.INIT, contentIntent = null)
+                withContext(Dispatchers.Main.immediate) { observeSheetVisibility(localTaskId) }
                 val customDir = getCustomDownloadDir()
                 directoryContentIntent = receiveDirectoryPendingIntent(localTaskId, customDir)
                 runReceive(info, localTaskId, customDir, directoryContentIntent, peerAddress) {
@@ -502,7 +572,7 @@ class P2pReceiverService : BaseP2pService() {
                     Log.i(TAG, "Peer closed session after receive completed")
                 } else {
                     Log.e(TAG, "Failed to process task", e)
-                    if (!retainTransferNotification) {
+                    if (!resultNotificationPosted) {
                         IncomingTransferUiCoordinator.fail(
                             localTaskId,
                             if (e is ExceptionWithMessage) {
@@ -519,13 +589,25 @@ class P2pReceiverService : BaseP2pService() {
                     taskNotificationJob?.cancel()
                     taskNotificationJob = null
                     IncomingTransferUiCoordinator.releaseDecision(localTaskId)
+                    awaitTransferCompletionDisplay(completionDisplayUntilMillis, SystemClock.elapsedRealtime())
+                    sheetVisibilityJob?.cancel()
+                    sheetVisibilityJob = null
                     NotificationUtils.releaseTask("receive", localTaskId)
-                    synchronized(currentTaskLock) {
+                    try {
                         if (currentTaskId == localTaskId) {
-                            try {
-                                LiveUpdateCoordinator.clearState("RECEIVER")
-                                if (!retainTransferNotification) removeTransferNotification()
-                            } finally {
+                            LiveUpdateCoordinator.clearState("RECEIVER")
+                            if (completionForegroundId != 0) {
+                                stopForeground(android.app.Service.STOP_FOREGROUND_DETACH)
+                                Log.i("TransferNotification", "direction=receive id=$completionForegroundId event=completion_detached")
+                                NotificationUtils.finalizeCompletionNotification(this@P2pReceiverService, completionForegroundId)
+                            } else {
+                                removeTransferNotification()
+                                Log.i("TransferNotification", "direction=receive id=$transferNotificationId event=foreground_removed")
+                            }
+                        }
+                    } finally {
+                        synchronized(currentTaskLock) {
+                            if (currentTaskId == localTaskId) {
                                 currentTaskId = null
                                 currentJob = null
                                 MyApplication.getInstance().clearBusy()
@@ -618,7 +700,7 @@ class P2pReceiverService : BaseP2pService() {
         val builder =
             createNotificationBuilder(R.drawable.ic_arrow_circle_down, contentIntent,
                 presentation?.brandId)
-                // Completion replaces the progress notification and must be allowed to alert again.
+                // Completion gets its own foreground ID so it can alert after the request.
                 .setOnlyAlertOnce(!alertUser)
                 .setSilent(!alertUser)
                 .let {

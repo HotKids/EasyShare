@@ -38,6 +38,7 @@
     <string name="recv_fail">Receive failed</string>
     <string name="noti_receive_complete_body">Files saved</string>
     <string name="sending">Sending</string>
+    <string name="sending_in_background">Sending in the background</string>
     <string name="send_ok">Send complete</string>
     <string name="send_partial">Some files sent</string>
     <string name="send_fail">Send failed</string>

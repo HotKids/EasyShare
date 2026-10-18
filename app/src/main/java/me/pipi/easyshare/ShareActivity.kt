@@ -414,8 +414,8 @@ internal fun restoredTransferState(
 
 internal fun nearbyDeviceColumns(widthDp: Float, fontScale: Float = 1f): Int {
     val horizontalPadding = if (widthDp >= 600f) 24f else 40f
-    val cellWidth = 118f * fontScale.coerceAtLeast(1f)
-    return ((widthDp - horizontalPadding) / cellWidth).toInt().coerceAtLeast(1)
+    val cellWidth = 72f * fontScale.coerceAtLeast(1f)
+    return ((widthDp - horizontalPadding) / cellWidth).toInt().coerceIn(1, 4)
 }
 
 @Composable

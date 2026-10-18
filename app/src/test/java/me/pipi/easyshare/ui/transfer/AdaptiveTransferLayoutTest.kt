@@ -20,27 +20,25 @@ class AdaptiveTransferLayoutTest {
     }
 
     @Test
-    fun discoveryUsesThreeColumnsOnlyWhenCellsCanFit() {
-        assertEquals(2, nearbyDeviceColumns(307f))
-        assertEquals(2, nearbyDeviceColumns(308f))
-        assertEquals(2, nearbyDeviceColumns(393f))
-        assertEquals(3, nearbyDeviceColumns(394f))
-        assertEquals(3, nearbyDeviceColumns(427f))
+    fun discoveryUsesFourColumnsAtStandardPhoneWidths() {
+        assertEquals(4, nearbyDeviceColumns(360f))
+        assertEquals(4, nearbyDeviceColumns(393f))
+        assertEquals(4, nearbyDeviceColumns(427f))
     }
 
     @Test
-    fun discoveryAdaptsContinuouslyForWideAndNarrowWindows() {
-        assertEquals(1, nearbyDeviceColumns(200f))
-        assertEquals(1, nearbyDeviceColumns(275f))
-        assertEquals(2, nearbyDeviceColumns(276f))
-        assertEquals(5, nearbyDeviceColumns(640f))
+    fun discoveryReducesColumnsInNarrowWindowsAndCapsWideWindowsAtFour() {
+        assertEquals(1, nearbyDeviceColumns(100f))
+        assertEquals(2, nearbyDeviceColumns(200f))
+        assertEquals(3, nearbyDeviceColumns(320f))
+        assertEquals(4, nearbyDeviceColumns(640f))
     }
 
     @Test
     fun largeTextReducesDeviceColumnsWithoutChangingNormalText() {
-        assertEquals(1, nearbyDeviceColumns(427f, 2f))
-        assertEquals(2, nearbyDeviceColumns(640f, 2f))
-        assertEquals(3, nearbyDeviceColumns(427f, 0.85f))
+        assertEquals(2, nearbyDeviceColumns(427f, 2f))
+        assertEquals(4, nearbyDeviceColumns(640f, 2f))
+        assertEquals(4, nearbyDeviceColumns(427f, 0.85f))
     }
 
 }

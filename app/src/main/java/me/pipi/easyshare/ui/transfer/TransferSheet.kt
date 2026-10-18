@@ -1,5 +1,8 @@
 package me.pipi.easyshare.ui.transfer
 
+import android.graphics.Paint
+import android.graphics.Rect
+import android.graphics.Typeface
 import androidx.annotation.DrawableRes
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.Image
@@ -10,27 +13,28 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.defaultMinSize
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.InlineTextContent
+import androidx.compose.foundation.text.appendInlineContent
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.Button
@@ -42,9 +46,14 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFontFamilyResolver
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -53,8 +62,18 @@ import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.text
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.Placeholder
+import androidx.compose.ui.text.PlaceholderVerticalAlign
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontSynthesis
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.IntOffset
+import kotlin.math.roundToInt
 import me.pipi.easyshare.R
 
 enum class TransferVisualState {
@@ -144,19 +163,56 @@ fun ColumnScope.TransferSheetBody(
             .verticalScroll(rememberScrollState()).padding(horizontal = 24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Row(
+        Box(
             modifier = Modifier.padding(top = 24.dp).heightIn(min = 24.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.Center,
+            contentAlignment = Alignment.Center,
         ) {
-            if (partyIconRes != null) {
-                val iconSize = with(LocalDensity.current) { MaterialTheme.typography.titleSmall.fontSize.toDp() }
-                Image(painterResource(partyIconRes), null, Modifier.size(iconSize))
-                Spacer(Modifier.width(4.dp))
+            val style = MaterialTheme.typography.titleSmall
+            val resolvedTypeface by LocalFontFamilyResolver.current.resolve(
+                style.fontFamily, style.fontWeight ?: FontWeight.Normal,
+                style.fontStyle ?: FontStyle.Normal, style.fontSynthesis ?: FontSynthesis.All,
+            )
+            val fontSizePx = with(LocalDensity.current) { style.fontSize.toPx() }
+            val textPaint = remember(resolvedTypeface, fontSizePx) {
+                Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    typeface = resolvedTypeface as Typeface
+                    textSize = fontSizePx
+                }
             }
-            Text(partyText, style = MaterialTheme.typography.titleSmall,
+            var iconOffsetPx by remember(partyText, partyIconRes, resolvedTypeface, fontSizePx) { mutableIntStateOf(0) }
+            val status = buildAnnotatedString {
+                if (partyIconRes != null) {
+                    appendInlineContent("partyIcon")
+                    append('\u2060')
+                }
+                append(partyText)
+            }
+            val inlineContent = if (partyIconRes != null) {
+                val width = with(LocalDensity.current) { (style.fontSize.toDp() + 4.dp).toSp() }
+                mapOf("partyIcon" to InlineTextContent(
+                    Placeholder(width, style.fontSize, PlaceholderVerticalAlign.TextCenter),
+                ) {
+                    Image(painterResource(partyIconRes), null,
+                        Modifier.offset { IntOffset(0, iconOffsetPx) }.fillMaxSize().padding(end = 4.dp))
+                })
+            } else emptyMap()
+            Text(status, inlineContent = inlineContent, style = style,
                 color = MaterialTheme.colorScheme.onSurface, textAlign = TextAlign.Center,
-                modifier = Modifier.weight(1f, fill = false).semantics { liveRegion = LiveRegionMode.Polite })
+                onTextLayout = { layout ->
+                    layout.placeholderRects.firstOrNull()?.let { icon ->
+                        // Align to the visible first-line glyphs, not the font's asymmetric line box.
+                        val textStart = status.length - partyText.length
+                        val firstLine = partyText.take((layout.getLineEnd(0, visibleEnd = true) - textStart).coerceAtLeast(0))
+                        val bounds = Rect()
+                        textPaint.getTextBounds(firstLine, 0, firstLine.length, bounds)
+                        iconOffsetPx = if (bounds.isEmpty) 0 else
+                            (layout.firstBaseline + bounds.exactCenterY() - icon.center.y).roundToInt()
+                    }
+                },
+                modifier = Modifier.clearAndSetSemantics {
+                    text = AnnotatedString(partyText)
+                    liveRegion = LiveRegionMode.Polite
+                })
         }
         transferSheetExplanation(partyText, message)?.let { explanation ->
             Text(explanation, style = MaterialTheme.typography.bodyMedium, textAlign = TextAlign.Center,

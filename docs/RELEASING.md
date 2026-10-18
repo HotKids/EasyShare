@@ -44,12 +44,12 @@ Pull requests run Release unit tests, lint, Kotlin/resource compilation, and R8 
 ## Publish a Release
 
 1. Update `versionCode` and `versionName` in `app/build.gradle.kts`.
-2. Add the current version to `CHANGELOG.md` and retain earlier entries.
+2. Update `CHANGELOG.md` to contain only the current version.
 3. Verify CI and merge the approved changes into `main`.
 4. Manually run **Android CI** on `main` and select **Publish a GitHub Release from main**.
 
 Pushing to `main` runs verification and uploads signed APK artifacts without creating a tag or Release. Manual runs also build only by default. Release publication requires an explicit `publish_release: true` input on `main`; other branches cannot publish. The workflow reads `versionName`, creates the corresponding `v<versionName>` tag, and publishes the signed APKs. An existing Release for that version is skipped.
 
-Release notes are published from `CHANGELOG.md`, including the current and previous version entries. The workflow retains existing Releases and version tags. The 1.0.0 changelog entry corresponds to the original `v1.0` release; its tag and download links remain unchanged.
+Release notes are published from `CHANGELOG.md` for the current version. After the new Release and both signed APKs have been verified, delete superseded GitHub Releases, their assets, and their version tags. Keep only the current Release and version tag. The publishing workflow does not perform this cleanup automatically.
 
 Publishing runs are not canceled by later pushes. GitHub may replace an older queued run with a newer run on the same ref; the release job publishes only the commit selected by an explicitly requested publishing run.
